@@ -111,7 +111,10 @@ func cmdList(nodeModulesDir string) error {
 }
 
 func cmdClean(nodeModulesDir string) error {
-	return RemoveLinks(nodeModulesDir)
+	if err := RemoveLinks(nodeModulesDir); err != nil {
+		return err
+	}
+	return deleteLinkState(nodeModulesDir)
 }
 
 func cmdLink(args []string, nmDir string) error {
@@ -166,5 +169,18 @@ func cmdLink(args []string, nmDir string) error {
 	} else {
 		printHeader("Linking packages:")
 	}
-	return Link(monorepo, nmDir, packages, dryRun)
+	if err := Link(monorepo, nmDir, packages, dryRun); err != nil {
+		return err
+	}
+
+	if !dryRun {
+		if err := saveLinkState(nmDir, &LinkState{
+			Monorepo:  monorepo.RootDir,
+			Requested: packages,
+		}); err != nil {
+			return err
+		}
+	}
+
+	return nil
 }

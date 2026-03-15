@@ -763,6 +763,310 @@ func TestDepsEqual(t *testing.T) {
 	}
 }
 
+// setTestStateDir overrides the state file path to use the given node_modules dir
+// (or a temp dir). Returns the state file path for assertions.
+func setTestStateDir(t *testing.T, nmDir string) string {
+	t.Helper()
+	original := stateFilePathFunc
+	stateFilePathFunc = func(dir string) string {
+		return filepath.Join(nmDir, stateFileName)
+	}
+	t.Cleanup(func() { stateFilePathFunc = original })
+	return filepath.Join(nmDir, stateFileName)
+}
+
+func TestLinkStateWrittenOnLink(t *testing.T) {
+	projectsDir := testdataDir(t)
+	monorepoDir := filepath.Join(projectsDir, "monorepo-yarn4")
+
+	m, err := LoadMonorepo(monorepoDir)
+	if err != nil {
+		t.Fatalf("LoadMonorepo: %v", err)
+	}
+
+	tmpDir := t.TempDir()
+	nmDir := filepath.Join(tmpDir, "node_modules")
+	os.MkdirAll(nmDir, 0o755)
+
+	// Create fake dirs
+	for _, name := range []string{"lodash-es", "underscore"} {
+		os.MkdirAll(filepath.Join(nmDir, name), 0o755)
+	}
+
+	statePath := setTestStateDir(t, nmDir)
+
+	// Link lodash-es (which transitively pulls in underscore)
+	if err := Link(m, nmDir, []string{"lodash-es"}, false); err != nil {
+		t.Fatalf("Link: %v", err)
+	}
+
+	// Save state with only the requested package
+	if err := saveLinkState(nmDir, &LinkState{
+		Monorepo:  m.RootDir,
+		Requested: []string{"lodash-es"},
+	}); err != nil {
+		t.Fatalf("saveLinkState: %v", err)
+	}
+
+	// Read and verify state file
+	state, err := loadLinkState(nmDir)
+	if err != nil {
+		t.Fatalf("loadLinkState: %v", err)
+	}
+	if state == nil {
+		t.Fatal("state should not be nil")
+	}
+
+	// State should contain only "lodash-es", NOT "underscore"
+	if len(state.Requested) != 1 || state.Requested[0] != "lodash-es" {
+		t.Errorf("state.Requested: expected [lodash-es], got %v", state.Requested)
+	}
+
+	// But both symlinks should exist
+	assertSymlink(t, filepath.Join(nmDir, "lodash-es"), m.Workspaces["lodash-es"].Dir)
+	assertSymlink(t, filepath.Join(nmDir, "underscore"), m.Workspaces["underscore"].Dir)
+
+	// Verify the state file is at the right location
+	if _, err := os.Stat(statePath); err != nil {
+		t.Fatalf("state file should exist at %s: %v", statePath, err)
+	}
+}
+
+func TestLinkStateDeletedOnClean(t *testing.T) {
+	projectsDir := testdataDir(t)
+	monorepoDir := filepath.Join(projectsDir, "monorepo-yarn4")
+
+	m, err := LoadMonorepo(monorepoDir)
+	if err != nil {
+		t.Fatalf("LoadMonorepo: %v", err)
+	}
+
+	tmpDir := t.TempDir()
+	nmDir := filepath.Join(tmpDir, "node_modules")
+	os.MkdirAll(nmDir, 0o755)
+	for _, name := range []string{"lodash-es", "underscore"} {
+		os.MkdirAll(filepath.Join(nmDir, name), 0o755)
+	}
+
+	statePath := setTestStateDir(t, nmDir)
+
+	// Link and save state
+	if err := Link(m, nmDir, []string{"lodash-es"}, false); err != nil {
+		t.Fatalf("Link: %v", err)
+	}
+	if err := saveLinkState(nmDir, &LinkState{
+		Monorepo:  m.RootDir,
+		Requested: []string{"lodash-es"},
+	}); err != nil {
+		t.Fatalf("saveLinkState: %v", err)
+	}
+
+	// Verify state file exists
+	if _, err := os.Stat(statePath); err != nil {
+		t.Fatalf("state file should exist: %v", err)
+	}
+
+	// Clean
+	if err := cmdClean(nmDir); err != nil {
+		t.Fatalf("cmdClean: %v", err)
+	}
+
+	// State file should be gone
+	if _, err := os.Stat(statePath); !os.IsNotExist(err) {
+		t.Error("state file should be deleted after clean")
+	}
+}
+
+func TestWatchCleansRemovedDeps(t *testing.T) {
+	_, monorepo := setupWatchTestMonorepo(t)
+
+	tmpDir := t.TempDir()
+	nmDir := filepath.Join(tmpDir, "node_modules")
+	os.MkdirAll(nmDir, 0o755)
+
+	for _, name := range []string{"pkg-a", "pkg-b"} {
+		os.MkdirAll(filepath.Join(nmDir, name), 0o755)
+	}
+
+	// Link pkg-a (which pulls in pkg-b transitively)
+	if err := Link(monorepo, nmDir, []string{"pkg-a"}, false); err != nil {
+		t.Fatalf("Link: %v", err)
+	}
+
+	// Save state with only the requested package
+	setTestStateDir(t, nmDir)
+	if err := saveLinkState(nmDir, &LinkState{
+		Monorepo:  monorepo.RootDir,
+		Requested: []string{"pkg-a"},
+	}); err != nil {
+		t.Fatalf("saveLinkState: %v", err)
+	}
+
+	// Verify both symlinks exist
+	assertSymlink(t, filepath.Join(nmDir, "pkg-a"), monorepo.Workspaces["pkg-a"].Dir)
+	assertSymlink(t, filepath.Join(nmDir, "pkg-b"), monorepo.Workspaces["pkg-b"].Dir)
+
+	links, _ := ScanLinks(nmDir)
+	watchSet := buildWatchSet(links, monorepo)
+
+	watcher, err := fsnotify.NewWatcher()
+	if err != nil {
+		t.Fatalf("NewWatcher: %v", err)
+	}
+	defer watcher.Close()
+
+	if err := addWatches(watcher, watchSet, nmDir); err != nil {
+		t.Fatalf("addWatches: %v", err)
+	}
+
+	eventCh := make(chan watchEvent, 10)
+	sigCh := make(chan os.Signal, 1)
+
+	done := make(chan error, 1)
+	go func() {
+		done <- runWatchLoop(watcher, watchSet, monorepo, nmDir, sigCh, eventCh)
+	}()
+
+	// Modify pkg-a's package.json to remove pkg-b dependency
+	pkgADir := monorepo.Workspaces["pkg-a"].Dir
+	newJSON := `{"name": "pkg-a", "version": "1.0.0"}`
+	os.WriteFile(filepath.Join(pkgADir, "package.json"), []byte(newJSON), 0o644)
+
+	select {
+	case evt := <-eventCh:
+		if evt.kind != "pkg_json_changed" || evt.pkgName != "pkg-a" {
+			t.Errorf("expected pkg_json_changed for pkg-a, got %+v", evt)
+		}
+	case err := <-done:
+		if err != nil {
+			t.Fatalf("watchLoop error: %v", err)
+		}
+	case <-time.After(5 * time.Second):
+		sigCh <- syscall.SIGINT
+		t.Fatal("timeout waiting for package.json change event")
+	}
+
+	// pkg-b symlink should be removed (it was a transitive dep that's no longer needed)
+	if _, err := os.Lstat(filepath.Join(nmDir, "pkg-b")); !os.IsNotExist(err) {
+		t.Error("pkg-b symlink should be removed after pkg-a drops the dependency")
+	}
+
+	// pkg-a should still be linked
+	assertSymlink(t, filepath.Join(nmDir, "pkg-a"), monorepo.Workspaces["pkg-a"].Dir)
+}
+
+func TestWatchCleansTransitiveDepsOnTargetDeletion(t *testing.T) {
+	_, monorepo := setupWatchTestMonorepo(t)
+
+	tmpDir := t.TempDir()
+	nmDir := filepath.Join(tmpDir, "node_modules")
+	os.MkdirAll(nmDir, 0o755)
+
+	for _, name := range []string{"pkg-a", "pkg-b"} {
+		os.MkdirAll(filepath.Join(nmDir, name), 0o755)
+	}
+
+	// Link pkg-a (which pulls in pkg-b transitively)
+	if err := Link(monorepo, nmDir, []string{"pkg-a"}, false); err != nil {
+		t.Fatalf("Link: %v", err)
+	}
+
+	// Save state
+	setTestStateDir(t, nmDir)
+	if err := saveLinkState(nmDir, &LinkState{
+		Monorepo:  monorepo.RootDir,
+		Requested: []string{"pkg-a"},
+	}); err != nil {
+		t.Fatalf("saveLinkState: %v", err)
+	}
+
+	links, _ := ScanLinks(nmDir)
+	watchSet := buildWatchSet(links, monorepo)
+
+	watcher, err := fsnotify.NewWatcher()
+	if err != nil {
+		t.Fatalf("NewWatcher: %v", err)
+	}
+	defer watcher.Close()
+
+	if err := addWatches(watcher, watchSet, nmDir); err != nil {
+		t.Fatalf("addWatches: %v", err)
+	}
+
+	eventCh := make(chan watchEvent, 10)
+	sigCh := make(chan os.Signal, 1)
+
+	done := make(chan error, 1)
+	go func() {
+		done <- runWatchLoop(watcher, watchSet, monorepo, nmDir, sigCh, eventCh)
+	}()
+
+	// Delete pkg-a's workspace directory
+	os.RemoveAll(monorepo.Workspaces["pkg-a"].Dir)
+
+	select {
+	case evt := <-eventCh:
+		if evt.kind != "target_gone" || evt.pkgName != "pkg-a" {
+			t.Errorf("expected target_gone for pkg-a, got %+v", evt)
+		}
+	case err := <-done:
+		if err != nil {
+			t.Fatalf("watchLoop error: %v", err)
+		}
+	case <-time.After(5 * time.Second):
+		sigCh <- syscall.SIGINT
+		t.Fatal("timeout waiting for target deletion event")
+	}
+
+	// Both pkg-a and pkg-b symlinks should be removed
+	if _, err := os.Lstat(filepath.Join(nmDir, "pkg-a")); !os.IsNotExist(err) {
+		t.Error("pkg-a symlink should be removed after target deletion")
+	}
+	if _, err := os.Lstat(filepath.Join(nmDir, "pkg-b")); !os.IsNotExist(err) {
+		t.Error("pkg-b symlink should be removed (transitive dep of deleted pkg-a)")
+	}
+}
+
+func TestStashUsesRequestedPackages(t *testing.T) {
+	stashPath := setTestStashDir(t)
+
+	projectsDir := testdataDir(t)
+	monorepoDir := filepath.Join(projectsDir, "monorepo-yarn4")
+
+	m, err := LoadMonorepo(monorepoDir)
+	if err != nil {
+		t.Fatalf("LoadMonorepo: %v", err)
+	}
+
+	nmDir := setupLinkedNodeModules(t, m, []string{"lodash-es"})
+
+	// Save state with only the requested package (not transitive deps)
+	setTestStateDir(t, nmDir)
+	if err := saveLinkState(nmDir, &LinkState{
+		Monorepo:  m.RootDir,
+		Requested: []string{"lodash-es"},
+	}); err != nil {
+		t.Fatalf("saveLinkState: %v", err)
+	}
+
+	// Stash should use the requested set from state
+	if err := cmdStash([]string{"--monorepo", monorepoDir}, nmDir); err != nil {
+		t.Fatalf("cmdStash: %v", err)
+	}
+
+	// Read stash data
+	var data StashData
+	b, _ := os.ReadFile(stashPath)
+	if err := json.Unmarshal(b, &data); err != nil {
+		t.Fatalf("parsing stash: %v", err)
+	}
+
+	// Should contain only "lodash-es" (not "underscore")
+	if len(data.Packages) != 1 || data.Packages[0] != "lodash-es" {
+		t.Errorf("stash packages: expected [lodash-es], got %v", data.Packages)
+	}
+}
+
 func assertSymlink(t *testing.T, path, expectedTarget string) {
 	t.Helper()
 	fi, err := os.Lstat(path)

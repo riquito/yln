@@ -241,7 +241,7 @@ func processWatchEvents(
 			// Check if the target dir was removed
 			if path == pkg.targetDir {
 				if _, err := os.Stat(pkg.targetDir); os.IsNotExist(err) {
-					handleTargetDirRemoved(name, pkg, nmDir, watcher, watchSet, eventCh)
+					handleTargetDirRemoved(name, pkg, nmDir, watcher, watchSet, monorepo, eventCh)
 				}
 			}
 		}
@@ -303,19 +303,65 @@ func handlePackageJSONChange(
 	fmt.Printf("  %s %s dependencies changed. Re-linking...\n",
 		successStyle.Render("↻"), name)
 
+	// Load state to get the requested set
+	state, _ := loadLinkState(nmDir)
+
+	// Determine the requested packages to re-resolve from
+	var requested []string
+	if state != nil {
+		requested = state.Requested
+	} else {
+		// Fallback: use all currently watched packages
+		for n := range watchSet {
+			requested = append(requested, n)
+		}
+	}
+
+	// Snapshot current symlinks before re-linking
+	oldLinks, _ := ScanLinks(nmDir)
+	oldSet := make(map[string]bool)
+	for _, link := range oldLinks {
+		oldSet[link.Name] = true
+	}
+
 	// Update monorepo workspace info
 	if ws, ok := monorepo.Workspaces[name]; ok {
 		ws.WorkDeps = newDeps
 		ws.PkgJSON = pkgJSON
 	}
 
-	// Re-link this package with updated deps
-	if err := Link(monorepo, nmDir, []string{name}, false); err != nil {
+	// Re-link from the full requested set
+	if err := Link(monorepo, nmDir, requested, false); err != nil {
 		fmt.Fprintf(os.Stderr, "  re-link error: %v\n", err)
 		return
 	}
 
-	// Update watch set: re-scan links and update
+	// Compute the new expected set and remove orphans
+	newExpected := ResolveLinkSet(monorepo, requested)
+	newSet := make(map[string]bool)
+	for _, n := range newExpected {
+		newSet[n] = true
+	}
+	for n := range oldSet {
+		if !newSet[n] {
+			symlinkPath := filepath.Join(nmDir, n)
+			os.Remove(symlinkPath)
+			if wp, ok := watchSet[n]; ok {
+				removeFromWatchSet(n, wp, watcher, watchSet)
+			}
+			printRemoved(n)
+		}
+	}
+
+	// Save updated state
+	if state != nil {
+		_ = saveLinkState(nmDir, &LinkState{
+			Monorepo:  state.Monorepo,
+			Requested: requested,
+		})
+	}
+
+	// Update watch set with new links
 	pkg.workDeps = newDeps
 	newLinks, err := ScanLinks(nmDir)
 	if err == nil {
@@ -333,6 +379,7 @@ func handleTargetDirRemoved(
 	nmDir string,
 	watcher *fsnotify.Watcher,
 	watchSet map[string]*watchedPackage,
+	monorepo *Monorepo,
 	eventCh chan<- watchEvent,
 ) {
 	fmt.Printf("  %s %s workspace directory was deleted.\n", warnStyle.Render("!"), name)
@@ -340,8 +387,46 @@ func handleTargetDirRemoved(
 	// Remove the symlink from node_modules if it still exists
 	symlinkPath := filepath.Join(nmDir, name)
 	os.Remove(symlinkPath)
-
 	removeFromWatchSet(name, pkg, watcher, watchSet)
+
+	// Load state to clean up transitive deps
+	state, _ := loadLinkState(nmDir)
+	if state != nil {
+		// Remove deleted package from requested set
+		var remaining []string
+		for _, r := range state.Requested {
+			if r != name {
+				remaining = append(remaining, r)
+			}
+		}
+
+		// Resolve what should be linked from the remaining requested set
+		newExpected := make(map[string]bool)
+		if len(remaining) > 0 {
+			for _, n := range ResolveLinkSet(monorepo, remaining) {
+				newExpected[n] = true
+			}
+		}
+
+		// Remove orphaned symlinks (packages no longer in the expected set)
+		links, _ := ScanLinks(nmDir)
+		for _, link := range links {
+			if !newExpected[link.Name] {
+				os.Remove(filepath.Join(nmDir, link.Name))
+				if wp, ok := watchSet[link.Name]; ok {
+					removeFromWatchSet(link.Name, wp, watcher, watchSet)
+				}
+				printRemoved(link.Name)
+			}
+		}
+
+		// Save updated state
+		_ = saveLinkState(nmDir, &LinkState{
+			Monorepo:  state.Monorepo,
+			Requested: remaining,
+		})
+	}
+
 	if eventCh != nil {
 		eventCh <- watchEvent{kind: "target_gone", pkgName: name}
 	}

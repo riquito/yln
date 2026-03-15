@@ -221,5 +221,18 @@ func cmdTUI(monorepoPath, nodeModulesDir string, dryRun bool) error {
 	} else {
 		printHeader("Linking packages:")
 	}
-	return Link(monorepo, nodeModulesDir, packages, dryRun)
+	if err := Link(monorepo, nodeModulesDir, packages, dryRun); err != nil {
+		return err
+	}
+
+	if !dryRun {
+		if err := saveLinkState(nodeModulesDir, &LinkState{
+			Monorepo:  monorepo.RootDir,
+			Requested: packages,
+		}); err != nil {
+			return err
+		}
+	}
+
+	return nil
 }

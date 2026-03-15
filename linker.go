@@ -19,6 +19,34 @@ func Link(monorepo *Monorepo, nodeModulesDir string, packageNames []string, dryR
 	return nil
 }
 
+// ResolveLinkSet computes the full set of package names that would be linked
+// (including transitive workspace deps) without touching the filesystem.
+func ResolveLinkSet(monorepo *Monorepo, packageNames []string) []string {
+	visited := make(map[string]bool)
+	for _, name := range packageNames {
+		resolveRecursive(monorepo, name, visited)
+	}
+	result := make([]string, 0, len(visited))
+	for name := range visited {
+		result = append(result, name)
+	}
+	return result
+}
+
+func resolveRecursive(monorepo *Monorepo, pkgName string, visited map[string]bool) {
+	if visited[pkgName] {
+		return
+	}
+	ws, ok := monorepo.Workspaces[pkgName]
+	if !ok {
+		return
+	}
+	visited[pkgName] = true
+	for _, dep := range ws.WorkDeps {
+		resolveRecursive(monorepo, dep, visited)
+	}
+}
+
 func linkRecursive(monorepo *Monorepo, nodeModulesDir, pkgName string, visited map[string]bool, dryRun bool) error {
 	if visited[pkgName] {
 		return nil // already linked or cycle

@@ -118,9 +118,16 @@ func cmdStash(args []string, nmDir string) error {
 		return nil
 	}
 
-	pkgNames := make([]string, len(links))
-	for i, link := range links {
-		pkgNames[i] = link.Name
+	// Prefer the requested packages from state (not all linked including transitive)
+	var pkgNames []string
+	state, _ := loadLinkState(nmDir)
+	if state != nil && len(state.Requested) > 0 {
+		pkgNames = state.Requested
+	} else {
+		pkgNames = make([]string, len(links))
+		for i, link := range links {
+			pkgNames[i] = link.Name
+		}
 	}
 
 	data := &StashData{
@@ -194,6 +201,14 @@ func cmdPop(args []string, nmDir string) error {
 
 	printHeader("Restoring packages:")
 	if err := Link(monorepo, nmDir, validPackages, false); err != nil {
+		return err
+	}
+
+	// Save state with the restored requested set
+	if err := saveLinkState(nmDir, &LinkState{
+		Monorepo:  monorepo.RootDir,
+		Requested: validPackages,
+	}); err != nil {
 		return err
 	}
 
