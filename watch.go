@@ -23,7 +23,7 @@ type watchedPackage struct {
 
 // watchEvent describes a change detected by the watcher.
 type watchEvent struct {
-	kind    string // "symlink_gone", "target_gone", "pkg_json_changed"
+	kind    string // "symlink_gone", "target_gone", "pkg_json_changed", "monorepo_reloaded"
 	pkgName string
 }
 
@@ -76,6 +76,10 @@ func cmdWatch(args []string, nmDir string) error {
 		return fmt.Errorf("setting up watches: %w", err)
 	}
 
+	// Watch .git/HEAD for branch switches (best-effort)
+	gitHeadPath := filepath.Join(monorepo.RootDir, ".git", "HEAD")
+	watcher.Add(gitHeadPath) // ignore error (bare repo, worktree, etc.)
+
 	printWatchStatus(watchSet)
 
 	// Set up signal handler
@@ -83,7 +87,7 @@ func cmdWatch(args []string, nmDir string) error {
 	signal.Notify(sigCh, syscall.SIGINT, syscall.SIGTERM)
 	defer signal.Stop(sigCh)
 
-	return runWatchLoop(watcher, watchSet, monorepo, nmDir, sigCh, nil)
+	return runWatchLoop(watcher, watchSet, &monorepo, nmDir, gitHeadPath, sigCh, nil)
 }
 
 func buildWatchSet(links []LinkInfo, monorepo *Monorepo) map[string]*watchedPackage {
@@ -150,8 +154,9 @@ func printWatchStatus(watchSet map[string]*watchedPackage) {
 func runWatchLoop(
 	watcher *fsnotify.Watcher,
 	watchSet map[string]*watchedPackage,
-	monorepo *Monorepo,
+	monorepo **Monorepo,
 	nmDir string,
+	gitHeadPath string,
 	sigCh <-chan os.Signal,
 	eventCh chan<- watchEvent,
 ) error {
@@ -189,7 +194,7 @@ func runWatchLoop(
 			}
 			pendingPaths = make(map[string]bool)
 
-			processWatchEvents(paths, watcher, watchSet, monorepo, nmDir, eventCh)
+			processWatchEvents(paths, watcher, watchSet, monorepo, nmDir, gitHeadPath, eventCh)
 
 			if len(watchSet) == 0 {
 				printInfo("All watched packages are gone. Exiting.")
@@ -219,10 +224,21 @@ func processWatchEvents(
 	paths []string,
 	watcher *fsnotify.Watcher,
 	watchSet map[string]*watchedPackage,
-	monorepo *Monorepo,
+	monorepo **Monorepo,
 	nmDir string,
+	gitHeadPath string,
 	eventCh chan<- watchEvent,
 ) {
+	// Check if .git/HEAD changed (branch switch)
+	if gitHeadPath != "" {
+		for _, path := range paths {
+			if path == gitHeadPath {
+				handleMonorepoReload(monorepo, watcher, watchSet, nmDir, gitHeadPath, eventCh)
+				return
+			}
+		}
+	}
+
 	for _, path := range paths {
 		// Check if this path is a symlink in node_modules being changed
 		for name, pkg := range watchSet {
@@ -234,14 +250,14 @@ func processWatchEvents(
 
 			// Check if this is a package.json change in the target dir
 			if path == pkg.pkgJSONPath || path == filepath.Join(pkg.targetDir, "package.json") {
-				handlePackageJSONChange(name, pkg, watcher, watchSet, monorepo, nmDir, eventCh)
+				handlePackageJSONChange(name, pkg, watcher, watchSet, *monorepo, nmDir, eventCh)
 				continue
 			}
 
 			// Check if the target dir was removed
 			if path == pkg.targetDir {
 				if _, err := os.Stat(pkg.targetDir); os.IsNotExist(err) {
-					handleTargetDirRemoved(name, pkg, nmDir, watcher, watchSet, monorepo, eventCh)
+					handleTargetDirRemoved(name, pkg, nmDir, watcher, watchSet, *monorepo, eventCh)
 				}
 			}
 		}
@@ -429,6 +445,100 @@ func handleTargetDirRemoved(
 
 	if eventCh != nil {
 		eventCh <- watchEvent{kind: "target_gone", pkgName: name}
+	}
+}
+
+func handleMonorepoReload(
+	monorepo **Monorepo,
+	watcher *fsnotify.Watcher,
+	watchSet map[string]*watchedPackage,
+	nmDir string,
+	gitHeadPath string,
+	eventCh chan<- watchEvent,
+) {
+	newMonorepo, err := LoadMonorepo((*monorepo).RootDir)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "  reload monorepo: %v\n", err)
+		return
+	}
+
+	// Load state to get the requested set
+	state, _ := loadLinkState(nmDir)
+	var requested []string
+	if state != nil {
+		requested = state.Requested
+	} else {
+		for n := range watchSet {
+			requested = append(requested, n)
+		}
+	}
+
+	// Snapshot current symlinks
+	oldLinks, _ := ScanLinks(nmDir)
+	oldSet := make(map[string]bool)
+	for _, link := range oldLinks {
+		oldSet[link.Name] = true
+	}
+
+	// Re-link with the new monorepo data
+	if err := Link(newMonorepo, nmDir, requested, false); err != nil {
+		fmt.Fprintf(os.Stderr, "  re-link after reload: %v\n", err)
+		return
+	}
+
+	// Remove orphaned symlinks
+	newExpected := ResolveLinkSet(newMonorepo, requested)
+	newSet := make(map[string]bool)
+	for _, n := range newExpected {
+		newSet[n] = true
+	}
+	for n := range oldSet {
+		if !newSet[n] {
+			os.Remove(filepath.Join(nmDir, n))
+			printRemoved(n)
+		}
+	}
+
+	// Rebuild watch set: remove old watches, clear map, rebuild
+	for name, pkg := range watchSet {
+		watcher.Remove(pkg.targetDir)
+		delete(watchSet, name)
+	}
+
+	newLinks, _ := ScanLinks(nmDir)
+	for _, link := range newLinks {
+		ws, ok := newMonorepo.Workspaces[link.Name]
+		if !ok {
+			continue
+		}
+		pkg := &watchedPackage{
+			name:        link.Name,
+			symlinkPath: link.Target,
+			targetDir:   ws.Dir,
+			pkgJSONPath: filepath.Join(ws.Dir, "package.json"),
+			workDeps:    ws.WorkDeps,
+		}
+		watchSet[link.Name] = pkg
+		watcher.Add(pkg.targetDir)
+	}
+
+	// Re-watch .git/HEAD (git may replace the file on branch switch)
+	watcher.Add(gitHeadPath)
+
+	// Update caller's monorepo reference
+	*monorepo = newMonorepo
+
+	fmt.Printf("  %s Monorepo reloaded after branch switch.\n", successStyle.Render("↻"))
+
+	if state != nil {
+		_ = saveLinkState(nmDir, &LinkState{
+			Monorepo:  newMonorepo.RootDir,
+			Requested: requested,
+		})
+	}
+
+	if eventCh != nil {
+		eventCh <- watchEvent{kind: "monorepo_reloaded"}
 	}
 }
 

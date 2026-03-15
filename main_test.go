@@ -549,7 +549,7 @@ func TestWatchDetectsSymlinkRemoval(t *testing.T) {
 	// Start watch loop in goroutine
 	done := make(chan error, 1)
 	go func() {
-		done <- runWatchLoop(watcher, watchSet, monorepo, nmDir, sigCh, eventCh)
+		done <- runWatchLoop(watcher, watchSet, &monorepo, nmDir, "", sigCh, eventCh)
 	}()
 
 	// Remove a symlink
@@ -603,7 +603,7 @@ func TestWatchDetectsPackageJSONChange(t *testing.T) {
 
 	done := make(chan error, 1)
 	go func() {
-		done <- runWatchLoop(watcher, watchSet, monorepo, nmDir, sigCh, eventCh)
+		done <- runWatchLoop(watcher, watchSet, &monorepo, nmDir, "", sigCh, eventCh)
 	}()
 
 	// Modify pkg-a's package.json to add pkg-c as a workspace dep
@@ -666,7 +666,7 @@ func TestWatchDetectsTargetDeletion(t *testing.T) {
 
 	done := make(chan error, 1)
 	go func() {
-		done <- runWatchLoop(watcher, watchSet, monorepo, nmDir, sigCh, eventCh)
+		done <- runWatchLoop(watcher, watchSet, &monorepo, nmDir, "", sigCh, eventCh)
 	}()
 
 	// Delete the workspace directory
@@ -723,7 +723,7 @@ func TestWatchExitsWhenAllGone(t *testing.T) {
 	done := make(chan error, 1)
 	go func() {
 		// No eventCh — loop should exit on its own when all packages gone
-		done <- runWatchLoop(watcher, watchSet, monorepo, nmDir, sigCh, nil)
+		done <- runWatchLoop(watcher, watchSet, &monorepo, nmDir, "", sigCh, nil)
 	}()
 
 	// Remove the only symlink
@@ -924,7 +924,7 @@ func TestWatchCleansRemovedDeps(t *testing.T) {
 
 	done := make(chan error, 1)
 	go func() {
-		done <- runWatchLoop(watcher, watchSet, monorepo, nmDir, sigCh, eventCh)
+		done <- runWatchLoop(watcher, watchSet, &monorepo, nmDir, "", sigCh, eventCh)
 	}()
 
 	// Modify pkg-a's package.json to remove pkg-b dependency
@@ -998,7 +998,7 @@ func TestWatchCleansTransitiveDepsOnTargetDeletion(t *testing.T) {
 
 	done := make(chan error, 1)
 	go func() {
-		done <- runWatchLoop(watcher, watchSet, monorepo, nmDir, sigCh, eventCh)
+		done <- runWatchLoop(watcher, watchSet, &monorepo, nmDir, "", sigCh, eventCh)
 	}()
 
 	// Delete pkg-a's workspace directory
@@ -1065,6 +1065,100 @@ func TestStashUsesRequestedPackages(t *testing.T) {
 	if len(data.Packages) != 1 || data.Packages[0] != "lodash-es" {
 		t.Errorf("stash packages: expected [lodash-es], got %v", data.Packages)
 	}
+}
+
+func TestWatchReloadsMonorepoOnHEADChange(t *testing.T) {
+	monorepoDir, monorepo := setupWatchTestMonorepo(t)
+
+	// Create a fake .git/HEAD file
+	gitDir := filepath.Join(monorepoDir, ".git")
+	os.MkdirAll(gitDir, 0o755)
+	gitHeadPath := filepath.Join(gitDir, "HEAD")
+	os.WriteFile(gitHeadPath, []byte("ref: refs/heads/main\n"), 0o644)
+
+	tmpDir := t.TempDir()
+	nmDir := filepath.Join(tmpDir, "node_modules")
+	os.MkdirAll(nmDir, 0o755)
+
+	// Link pkg-a (pulls in pkg-b transitively)
+	for _, name := range []string{"pkg-a", "pkg-b"} {
+		os.MkdirAll(filepath.Join(nmDir, name), 0o755)
+	}
+	if err := Link(monorepo, nmDir, []string{"pkg-a"}, false); err != nil {
+		t.Fatalf("Link: %v", err)
+	}
+
+	// Save state
+	setTestStateDir(t, nmDir)
+	if err := saveLinkState(nmDir, &LinkState{
+		Monorepo:  monorepo.RootDir,
+		Requested: []string{"pkg-a"},
+	}); err != nil {
+		t.Fatalf("saveLinkState: %v", err)
+	}
+
+	links, _ := ScanLinks(nmDir)
+	watchSet := buildWatchSet(links, monorepo)
+
+	watcher, err := fsnotify.NewWatcher()
+	if err != nil {
+		t.Fatalf("NewWatcher: %v", err)
+	}
+	defer watcher.Close()
+
+	if err := addWatches(watcher, watchSet, nmDir); err != nil {
+		t.Fatalf("addWatches: %v", err)
+	}
+	watcher.Add(gitHeadPath)
+
+	eventCh := make(chan watchEvent, 10)
+	sigCh := make(chan os.Signal, 1)
+
+	done := make(chan error, 1)
+	go func() {
+		done <- runWatchLoop(watcher, watchSet, &monorepo, nmDir, gitHeadPath, sigCh, eventCh)
+	}()
+
+	// Add a new workspace pkg-d to the monorepo
+	pkgDDir := filepath.Join(monorepoDir, "packages", "pkg-d")
+	os.MkdirAll(pkgDDir, 0o755)
+	os.WriteFile(filepath.Join(pkgDDir, "package.json"),
+		[]byte(`{"name": "pkg-d", "version": "1.0.0"}`), 0o644)
+
+	// Make pkg-a depend on pkg-d
+	pkgADir := monorepo.Workspaces["pkg-a"].Dir
+	os.WriteFile(filepath.Join(pkgADir, "package.json"),
+		[]byte(`{"name": "pkg-a", "version": "1.0.0", "dependencies": {"pkg-b": "workspace:*", "pkg-d": "workspace:*"}}`), 0o644)
+
+	// Simulate branch switch by modifying .git/HEAD
+	os.WriteFile(gitHeadPath, []byte("ref: refs/heads/feature-branch\n"), 0o644)
+
+	select {
+	case evt := <-eventCh:
+		if evt.kind != "monorepo_reloaded" {
+			t.Errorf("expected monorepo_reloaded, got %+v", evt)
+		}
+	case err := <-done:
+		if err != nil {
+			t.Fatalf("watchLoop error: %v", err)
+		}
+	case <-time.After(5 * time.Second):
+		sigCh <- syscall.SIGINT
+		t.Fatal("timeout waiting for monorepo_reloaded event")
+	}
+
+	// Verify pkg-d is now symlinked (new workspace discovered after reload)
+	fi, err := os.Lstat(filepath.Join(nmDir, "pkg-d"))
+	if err != nil {
+		t.Fatalf("pkg-d should exist after reload: %v", err)
+	}
+	if fi.Mode()&os.ModeSymlink == 0 {
+		t.Error("pkg-d should be a symlink after reload")
+	}
+
+	// pkg-a and pkg-b should still be linked
+	assertSymlink(t, filepath.Join(nmDir, "pkg-a"), monorepo.Workspaces["pkg-a"].Dir)
+	assertSymlink(t, filepath.Join(nmDir, "pkg-b"), monorepo.Workspaces["pkg-b"].Dir)
 }
 
 func assertSymlink(t *testing.T, path, expectedTarget string) {
