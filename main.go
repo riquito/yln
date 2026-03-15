@@ -13,6 +13,7 @@ Usage:
   yln <pkg1> [pkg2...] [--monorepo <path>] [--dry-run]    Link packages from a monorepo
   yln list                                                 Show currently linked packages
   yln clean                                                Remove all symlinks
+  yln watch [--monorepo <path>]                             Watch linked packages for changes
   yln stash [--monorepo <path>]                            Save links and remove them
   yln pop [--monorepo <path>]                              Restore previously stashed links
 
@@ -41,6 +42,8 @@ func run(args []string) error {
 		return cmdList(nodeModulesDir())
 	case "clean":
 		return cmdClean(nodeModulesDir())
+	case "watch":
+		return cmdWatch(args[1:], nodeModulesDir())
 	case "stash":
 		return cmdStash(args[1:], nodeModulesDir())
 	case "pop":

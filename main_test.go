@@ -6,7 +6,11 @@ import (
 	"path/filepath"
 	"runtime"
 	"sort"
+	"syscall"
 	"testing"
+	"time"
+
+	"github.com/fsnotify/fsnotify"
 )
 
 func testdataDir(t *testing.T) string {
@@ -477,6 +481,285 @@ func TestPopMissingPackage(t *testing.T) {
 	}
 	if linkedNames["nonexistent-pkg"] {
 		t.Error("nonexistent-pkg should not be linked")
+	}
+}
+
+func setupWatchTestMonorepo(t *testing.T) (monorepoDir string, monorepo *Monorepo) {
+	t.Helper()
+	tmpDir := t.TempDir()
+	monorepoDir = filepath.Join(tmpDir, "monorepo")
+
+	// Create workspace packages
+	for _, pkg := range []struct {
+		dir  string
+		json string
+	}{
+		{"packages/pkg-a", `{"name": "pkg-a", "version": "1.0.0", "dependencies": {"pkg-b": "workspace:*"}}`},
+		{"packages/pkg-b", `{"name": "pkg-b", "version": "1.0.0"}`},
+		{"packages/pkg-c", `{"name": "pkg-c", "version": "1.0.0"}`},
+	} {
+		dir := filepath.Join(monorepoDir, pkg.dir)
+		os.MkdirAll(dir, 0o755)
+		os.WriteFile(filepath.Join(dir, "package.json"), []byte(pkg.json), 0o644)
+	}
+
+	// Root package.json
+	os.WriteFile(filepath.Join(monorepoDir, "package.json"),
+		[]byte(`{"private": true, "workspaces": ["packages/*"]}`), 0o644)
+
+	m, err := LoadMonorepo(monorepoDir)
+	if err != nil {
+		t.Fatalf("LoadMonorepo: %v", err)
+	}
+	return monorepoDir, m
+}
+
+func TestWatchDetectsSymlinkRemoval(t *testing.T) {
+	_, monorepo := setupWatchTestMonorepo(t)
+
+	tmpDir := t.TempDir()
+	nmDir := filepath.Join(tmpDir, "node_modules")
+	os.MkdirAll(nmDir, 0o755)
+
+	// Create fake dirs then link
+	for _, name := range []string{"pkg-a", "pkg-b"} {
+		os.MkdirAll(filepath.Join(nmDir, name), 0o755)
+	}
+	if err := Link(monorepo, nmDir, []string{"pkg-a"}, false); err != nil {
+		t.Fatalf("Link: %v", err)
+	}
+
+	// Build watch set
+	links, _ := ScanLinks(nmDir)
+	watchSet := buildWatchSet(links, monorepo)
+
+	watcher, err := fsnotify.NewWatcher()
+	if err != nil {
+		t.Fatalf("NewWatcher: %v", err)
+	}
+	defer watcher.Close()
+
+	if err := addWatches(watcher, watchSet, nmDir); err != nil {
+		t.Fatalf("addWatches: %v", err)
+	}
+
+	eventCh := make(chan watchEvent, 10)
+	sigCh := make(chan os.Signal, 1)
+
+	// Start watch loop in goroutine
+	done := make(chan error, 1)
+	go func() {
+		done <- runWatchLoop(watcher, watchSet, monorepo, nmDir, sigCh, eventCh)
+	}()
+
+	// Remove a symlink
+	os.Remove(filepath.Join(nmDir, "pkg-a"))
+
+	// Wait for event
+	select {
+	case evt := <-eventCh:
+		if evt.kind != "symlink_gone" || evt.pkgName != "pkg-a" {
+			t.Errorf("expected symlink_gone for pkg-a, got %+v", evt)
+		}
+	case err := <-done:
+		if err != nil {
+			t.Fatalf("watchLoop error: %v", err)
+		}
+	case <-time.After(5 * time.Second):
+		sigCh <- syscall.SIGINT
+		t.Fatal("timeout waiting for symlink removal event")
+	}
+}
+
+func TestWatchDetectsPackageJSONChange(t *testing.T) {
+	_, monorepo := setupWatchTestMonorepo(t)
+
+	tmpDir := t.TempDir()
+	nmDir := filepath.Join(tmpDir, "node_modules")
+	os.MkdirAll(nmDir, 0o755)
+
+	for _, name := range []string{"pkg-a", "pkg-b", "pkg-c"} {
+		os.MkdirAll(filepath.Join(nmDir, name), 0o755)
+	}
+	if err := Link(monorepo, nmDir, []string{"pkg-a"}, false); err != nil {
+		t.Fatalf("Link: %v", err)
+	}
+
+	links, _ := ScanLinks(nmDir)
+	watchSet := buildWatchSet(links, monorepo)
+
+	watcher, err := fsnotify.NewWatcher()
+	if err != nil {
+		t.Fatalf("NewWatcher: %v", err)
+	}
+	defer watcher.Close()
+
+	if err := addWatches(watcher, watchSet, nmDir); err != nil {
+		t.Fatalf("addWatches: %v", err)
+	}
+
+	eventCh := make(chan watchEvent, 10)
+	sigCh := make(chan os.Signal, 1)
+
+	done := make(chan error, 1)
+	go func() {
+		done <- runWatchLoop(watcher, watchSet, monorepo, nmDir, sigCh, eventCh)
+	}()
+
+	// Modify pkg-a's package.json to add pkg-c as a workspace dep
+	pkgADir := monorepo.Workspaces["pkg-a"].Dir
+	newJSON := `{"name": "pkg-a", "version": "1.0.0", "dependencies": {"pkg-b": "workspace:*", "pkg-c": "workspace:*"}}`
+	os.WriteFile(filepath.Join(pkgADir, "package.json"), []byte(newJSON), 0o644)
+
+	select {
+	case evt := <-eventCh:
+		if evt.kind != "pkg_json_changed" || evt.pkgName != "pkg-a" {
+			t.Errorf("expected pkg_json_changed for pkg-a, got %+v", evt)
+		}
+	case err := <-done:
+		if err != nil {
+			t.Fatalf("watchLoop error: %v", err)
+		}
+	case <-time.After(5 * time.Second):
+		sigCh <- syscall.SIGINT
+		t.Fatal("timeout waiting for package.json change event")
+	}
+
+	// Verify pkg-c got linked as a result
+	fi, err := os.Lstat(filepath.Join(nmDir, "pkg-c"))
+	if err != nil {
+		t.Fatalf("pkg-c should exist: %v", err)
+	}
+	if fi.Mode()&os.ModeSymlink == 0 {
+		t.Error("pkg-c should be a symlink after re-link")
+	}
+}
+
+func TestWatchDetectsTargetDeletion(t *testing.T) {
+	_, monorepo := setupWatchTestMonorepo(t)
+
+	tmpDir := t.TempDir()
+	nmDir := filepath.Join(tmpDir, "node_modules")
+	os.MkdirAll(nmDir, 0o755)
+
+	// Link only pkg-c (no transitive deps)
+	os.MkdirAll(filepath.Join(nmDir, "pkg-c"), 0o755)
+	if err := Link(monorepo, nmDir, []string{"pkg-c"}, false); err != nil {
+		t.Fatalf("Link: %v", err)
+	}
+
+	links, _ := ScanLinks(nmDir)
+	watchSet := buildWatchSet(links, monorepo)
+
+	watcher, err := fsnotify.NewWatcher()
+	if err != nil {
+		t.Fatalf("NewWatcher: %v", err)
+	}
+	defer watcher.Close()
+
+	if err := addWatches(watcher, watchSet, nmDir); err != nil {
+		t.Fatalf("addWatches: %v", err)
+	}
+
+	eventCh := make(chan watchEvent, 10)
+	sigCh := make(chan os.Signal, 1)
+
+	done := make(chan error, 1)
+	go func() {
+		done <- runWatchLoop(watcher, watchSet, monorepo, nmDir, sigCh, eventCh)
+	}()
+
+	// Delete the workspace directory
+	os.RemoveAll(monorepo.Workspaces["pkg-c"].Dir)
+
+	select {
+	case evt := <-eventCh:
+		if evt.kind != "target_gone" || evt.pkgName != "pkg-c" {
+			t.Errorf("expected target_gone for pkg-c, got %+v", evt)
+		}
+	case err := <-done:
+		if err != nil {
+			t.Fatalf("watchLoop error: %v", err)
+		}
+	case <-time.After(5 * time.Second):
+		sigCh <- syscall.SIGINT
+		t.Fatal("timeout waiting for target deletion event")
+	}
+
+	// Symlink should be cleaned up
+	if _, err := os.Lstat(filepath.Join(nmDir, "pkg-c")); !os.IsNotExist(err) {
+		t.Error("pkg-c symlink should be removed after target deletion")
+	}
+}
+
+func TestWatchExitsWhenAllGone(t *testing.T) {
+	_, monorepo := setupWatchTestMonorepo(t)
+
+	tmpDir := t.TempDir()
+	nmDir := filepath.Join(tmpDir, "node_modules")
+	os.MkdirAll(nmDir, 0o755)
+
+	// Link only pkg-c
+	os.MkdirAll(filepath.Join(nmDir, "pkg-c"), 0o755)
+	if err := Link(monorepo, nmDir, []string{"pkg-c"}, false); err != nil {
+		t.Fatalf("Link: %v", err)
+	}
+
+	links, _ := ScanLinks(nmDir)
+	watchSet := buildWatchSet(links, monorepo)
+
+	watcher, err := fsnotify.NewWatcher()
+	if err != nil {
+		t.Fatalf("NewWatcher: %v", err)
+	}
+	defer watcher.Close()
+
+	if err := addWatches(watcher, watchSet, nmDir); err != nil {
+		t.Fatalf("addWatches: %v", err)
+	}
+
+	sigCh := make(chan os.Signal, 1)
+
+	done := make(chan error, 1)
+	go func() {
+		// No eventCh — loop should exit on its own when all packages gone
+		done <- runWatchLoop(watcher, watchSet, monorepo, nmDir, sigCh, nil)
+	}()
+
+	// Remove the only symlink
+	os.Remove(filepath.Join(nmDir, "pkg-c"))
+
+	select {
+	case err := <-done:
+		if err != nil {
+			t.Fatalf("watchLoop should exit cleanly, got: %v", err)
+		}
+	case <-time.After(5 * time.Second):
+		sigCh <- syscall.SIGINT
+		t.Fatal("timeout: watcher should have exited when all packages gone")
+	}
+
+	if len(watchSet) != 0 {
+		t.Errorf("watchSet should be empty, has %d entries", len(watchSet))
+	}
+}
+
+func TestDepsEqual(t *testing.T) {
+	tests := []struct {
+		a, b []string
+		want bool
+	}{
+		{nil, nil, true},
+		{[]string{"a"}, []string{"a"}, true},
+		{[]string{"b", "a"}, []string{"a", "b"}, true},
+		{[]string{"a"}, []string{"b"}, false},
+		{[]string{"a"}, nil, false},
+	}
+	for _, tt := range tests {
+		got := depsEqual(tt.a, tt.b)
+		if got != tt.want {
+			t.Errorf("depsEqual(%v, %v) = %v, want %v", tt.a, tt.b, got, tt.want)
+		}
 	}
 }
 

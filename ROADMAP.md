@@ -179,8 +179,16 @@ manual symlink approach.
 - [x] Handles missing packages (skipped silently on pop)
 - [x] `--monorepo` override on both commands
 
+### v0.5 — Watch mode
+
+- [x] `yln watch` — monitor linked packages for changes
+- [x] Detect symlink removal / clobbering by `yarn install`
+- [x] Detect workspace directory deletion
+- [x] Re-link on `package.json` dependency changes
+- [x] Auto-exit when all watched packages are gone
+- [x] 100ms debounce to coalesce rapid filesystem events
+
 ### Future ideas
 
-- Watch mode: re-link on workspace changes
 - Support for pnpm/npm workspaces (not just yarn)
 - Shell completions
