@@ -64,6 +64,32 @@ This is all-or-nothing by design. Selectively unlinking individual packages
 while leaving others linked is unreliable — transitive dependencies may be
 shared between linked packages, so removing one could break another.
 
+### `yln stash`
+
+Save current links and remove them. Useful for temporarily reverting to real
+npm packages (e.g. to test production behavior or run CI locally).
+
+```sh
+yln stash
+yln stash --monorepo ~/projects/my-monorepo
+```
+
+The stash is stored at `~/.cache/yln/stash.json`. There is one global stash
+slot — stashing again overwrites the previous stash.
+
+### `yln pop`
+
+Restore previously stashed links.
+
+```sh
+yln pop
+yln pop --monorepo ~/projects/other-monorepo
+```
+
+Uses the monorepo path saved at stash time by default. Pass `--monorepo` to
+override (e.g. if the monorepo moved). Packages that no longer exist in the
+monorepo workspaces are silently skipped.
+
 ## Configuration
 
 Config file: `~/.config/yln/config.toml`
@@ -144,6 +170,14 @@ manual symlink approach.
 - [x] Colored output and progress feedback
 - [x] `--dry-run` flag
 - [x] Handle edge cases (nested `node_modules/`, scoped packages)
+
+### v0.4 — Stash / Pop
+
+- [x] `yln stash` — save current links and remove them
+- [x] `yln pop` — restore previously stashed links
+- [x] Single stash slot at `~/.cache/yln/stash.json`
+- [x] Handles missing packages (skipped silently on pop)
+- [x] `--monorepo` override on both commands
 
 ### Future ideas
 

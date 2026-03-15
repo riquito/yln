@@ -1,6 +1,7 @@
 package main
 
 import (
+	"encoding/json"
 	"os"
 	"path/filepath"
 	"runtime"
@@ -282,6 +283,201 @@ func TestScopedPackageLink(t *testing.T) {
 
 	// Verify @scope/pkg is a symlink to the right target
 	assertSymlink(t, filepath.Join(nodeModulesDir, "@scope", "pkg"), pkgDir)
+}
+
+// setTestStashDir overrides the stash file path to use a temporary directory.
+// Returns a cleanup function that restores the original.
+func setTestStashDir(t *testing.T) string {
+	t.Helper()
+	tmpDir := t.TempDir()
+	stashPath := filepath.Join(tmpDir, "stash.json")
+	original := stashFilePathFunc
+	stashFilePathFunc = func() (string, error) { return stashPath, nil }
+	t.Cleanup(func() { stashFilePathFunc = original })
+	return stashPath
+}
+
+func setupLinkedNodeModules(t *testing.T, monorepo *Monorepo, packages []string) string {
+	t.Helper()
+	tmpDir := t.TempDir()
+	nmDir := filepath.Join(tmpDir, "node_modules")
+	if err := os.MkdirAll(nmDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	// Create fake dirs for all known packages so Link can replace them
+	for _, name := range packages {
+		dir := filepath.Join(nmDir, name)
+		if err := os.MkdirAll(dir, 0o755); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := Link(monorepo, nmDir, packages, false); err != nil {
+		t.Fatalf("Link: %v", err)
+	}
+	return nmDir
+}
+
+func TestStashAndPop(t *testing.T) {
+	stashPath := setTestStashDir(t)
+
+	projectsDir := testdataDir(t)
+	monorepoDir := filepath.Join(projectsDir, "monorepo-yarn4")
+
+	m, err := LoadMonorepo(monorepoDir)
+	if err != nil {
+		t.Fatalf("LoadMonorepo: %v", err)
+	}
+
+	nmDir := setupLinkedNodeModules(t, m, []string{"lodash-es"})
+
+	// Verify links exist before stash
+	links, _ := ScanLinks(nmDir)
+	if len(links) != 2 { // lodash-es + underscore (transitive)
+		t.Fatalf("expected 2 links before stash, got %d", len(links))
+	}
+
+	// Stash
+	if err := cmdStash([]string{"--monorepo", monorepoDir}, nmDir); err != nil {
+		t.Fatalf("cmdStash: %v", err)
+	}
+
+	// Verify symlinks removed
+	links, _ = ScanLinks(nmDir)
+	if len(links) != 0 {
+		t.Errorf("expected 0 links after stash, got %d", len(links))
+	}
+
+	// Verify stash file exists
+	if _, err := os.Stat(stashPath); err != nil {
+		t.Fatalf("stash file should exist: %v", err)
+	}
+
+	// Read stash data and verify contents
+	var data StashData
+	b, _ := os.ReadFile(stashPath)
+	if err := json.Unmarshal(b, &data); err != nil {
+		t.Fatalf("parsing stash: %v", err)
+	}
+	if data.Monorepo != monorepoDir {
+		t.Errorf("stash monorepo: expected %q, got %q", monorepoDir, data.Monorepo)
+	}
+	sort.Strings(data.Packages)
+	if len(data.Packages) != 2 || data.Packages[0] != "lodash-es" || data.Packages[1] != "underscore" {
+		t.Errorf("stash packages: expected [lodash-es underscore], got %v", data.Packages)
+	}
+
+	// Pop
+	if err := cmdPop(nil, nmDir); err != nil {
+		t.Fatalf("cmdPop: %v", err)
+	}
+
+	// Verify symlinks restored
+	links, _ = ScanLinks(nmDir)
+	if len(links) != 2 {
+		t.Errorf("expected 2 links after pop, got %d", len(links))
+	}
+
+	// Verify stash file deleted
+	if _, err := os.Stat(stashPath); !os.IsNotExist(err) {
+		t.Error("stash file should be deleted after pop")
+	}
+}
+
+func TestDoubleStash(t *testing.T) {
+	stashPath := setTestStashDir(t)
+
+	projectsDir := testdataDir(t)
+	monorepoDir := filepath.Join(projectsDir, "monorepo-yarn4")
+
+	m, err := LoadMonorepo(monorepoDir)
+	if err != nil {
+		t.Fatalf("LoadMonorepo: %v", err)
+	}
+
+	// First stash with lodash-es + underscore
+	nmDir := setupLinkedNodeModules(t, m, []string{"lodash-es"})
+	if err := cmdStash([]string{"--monorepo", monorepoDir}, nmDir); err != nil {
+		t.Fatalf("first stash: %v", err)
+	}
+
+	// Second stash with ramda only
+	nmDir2 := setupLinkedNodeModules(t, m, []string{"ramda"})
+	if err := cmdStash([]string{"--monorepo", monorepoDir}, nmDir2); err != nil {
+		t.Fatalf("second stash: %v", err)
+	}
+
+	// Stash should contain only ramda
+	var data StashData
+	b, _ := os.ReadFile(stashPath)
+	if err := json.Unmarshal(b, &data); err != nil {
+		t.Fatalf("parsing stash: %v", err)
+	}
+	if len(data.Packages) != 1 || data.Packages[0] != "ramda" {
+		t.Errorf("double stash: expected [ramda], got %v", data.Packages)
+	}
+}
+
+func TestPopEmpty(t *testing.T) {
+	setTestStashDir(t)
+
+	// Pop with no stash file should not error
+	tmpDir := t.TempDir()
+	nmDir := filepath.Join(tmpDir, "node_modules")
+	if err := os.MkdirAll(nmDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := cmdPop(nil, nmDir); err != nil {
+		t.Fatalf("cmdPop with no stash: %v", err)
+	}
+}
+
+func TestPopMissingPackage(t *testing.T) {
+	setTestStashDir(t)
+
+	projectsDir := testdataDir(t)
+	monorepoDir := filepath.Join(projectsDir, "monorepo-yarn4")
+
+	m, err := LoadMonorepo(monorepoDir)
+	if err != nil {
+		t.Fatalf("LoadMonorepo: %v", err)
+	}
+
+	nmDir := setupLinkedNodeModules(t, m, []string{"lodash-es"})
+
+	// Stash
+	if err := cmdStash([]string{"--monorepo", monorepoDir}, nmDir); err != nil {
+		t.Fatalf("cmdStash: %v", err)
+	}
+
+	// Tamper with stash: add a package that doesn't exist in monorepo
+	stashPath, _ := stashFilePath()
+	b, _ := os.ReadFile(stashPath)
+	var data StashData
+	json.Unmarshal(b, &data)
+	data.Packages = append(data.Packages, "nonexistent-pkg")
+	b, _ = json.Marshal(data)
+	os.WriteFile(stashPath, b, 0o644)
+
+	// Pop should succeed, skipping nonexistent-pkg
+	if err := cmdPop(nil, nmDir); err != nil {
+		t.Fatalf("cmdPop with missing package: %v", err)
+	}
+
+	// Verify only real packages got linked
+	links, _ := ScanLinks(nmDir)
+	linkedNames := make(map[string]bool)
+	for _, link := range links {
+		linkedNames[link.Name] = true
+	}
+	if !linkedNames["lodash-es"] {
+		t.Error("expected lodash-es to be restored")
+	}
+	if !linkedNames["underscore"] {
+		t.Error("expected underscore to be restored (transitive)")
+	}
+	if linkedNames["nonexistent-pkg"] {
+		t.Error("nonexistent-pkg should not be linked")
+	}
 }
 
 func assertSymlink(t *testing.T, path, expectedTarget string) {
