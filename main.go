@@ -9,7 +9,8 @@ import (
 const usage = `yln — yarn linker
 
 Usage:
-  yln <pkg1> [pkg2...] [--monorepo <path>]   Link packages from a monorepo
+  yln [--monorepo <path>]                     Interactive package picker
+  yln <pkg1> [pkg2...] [--monorepo <path>]    Link packages from a monorepo
   yln list                                    Show currently linked packages
   yln clean                                   Remove all symlinks
 
@@ -29,28 +30,57 @@ func main() {
 
 func run(args []string) error {
 	if len(args) == 0 {
-		fmt.Print(usage)
-		return nil
+		return cmdLink(args, nodeModulesDir())
 	}
-
-	// Find node_modules in cwd
-	cwd, err := os.Getwd()
-	if err != nil {
-		return fmt.Errorf("getting cwd: %w", err)
-	}
-	nodeModulesDir := filepath.Join(cwd, "node_modules")
 
 	switch args[0] {
 	case "list":
-		return cmdList(nodeModulesDir)
+		return cmdList(nodeModulesDir())
 	case "clean":
-		return cmdClean(nodeModulesDir)
+		return cmdClean(nodeModulesDir())
 	case "--help", "-h":
 		fmt.Print(usage)
 		return nil
 	default:
-		return cmdLink(args, nodeModulesDir)
+		return cmdLink(args, nodeModulesDir())
 	}
+}
+
+func nodeModulesDir() string {
+	cwd, err := os.Getwd()
+	if err != nil {
+		return "node_modules"
+	}
+	return filepath.Join(cwd, "node_modules")
+}
+
+// resolveMonorepo resolves --monorepo flag > config > error, loads and returns Monorepo.
+func resolveMonorepo(monorepoPath string) (*Monorepo, error) {
+	if monorepoPath == "" {
+		cfg, err := LoadConfig()
+		if err != nil {
+			return nil, fmt.Errorf("loading config: %w", err)
+		}
+		if cfg != nil {
+			monorepoPath = cfg.Monorepo
+		}
+	}
+
+	if monorepoPath == "" {
+		return nil, fmt.Errorf("no monorepo path specified (use --monorepo or set it in ~/.config/yln/config.toml)")
+	}
+
+	monorepoPath, err := filepath.Abs(monorepoPath)
+	if err != nil {
+		return nil, fmt.Errorf("resolving monorepo path: %w", err)
+	}
+
+	monorepo, err := LoadMonorepo(monorepoPath)
+	if err != nil {
+		return nil, fmt.Errorf("loading monorepo: %w", err)
+	}
+
+	return monorepo, nil
 }
 
 func cmdList(nodeModulesDir string) error {
@@ -74,7 +104,7 @@ func cmdClean(nodeModulesDir string) error {
 	return RemoveLinks(nodeModulesDir)
 }
 
-func cmdLink(args []string, nodeModulesDir string) error {
+func cmdLink(args []string, nmDir string) error {
 	var monorepoPath string
 	var packages []string
 
@@ -93,40 +123,19 @@ func cmdLink(args []string, nodeModulesDir string) error {
 		}
 	}
 
+	// No packages specified: launch interactive TUI
 	if len(packages) == 0 {
-		return fmt.Errorf("no packages specified\n\n%s", usage)
+		return cmdTUI(monorepoPath, nmDir)
 	}
 
-	// Resolve monorepo path: --monorepo > config > error
-	if monorepoPath == "" {
-		cfg, err := LoadConfig()
-		if err != nil {
-			return fmt.Errorf("loading config: %w", err)
-		}
-		if cfg != nil {
-			monorepoPath = cfg.Monorepo
-		}
-	}
-
-	if monorepoPath == "" {
-		return fmt.Errorf("no monorepo path specified (use --monorepo or set it in ~/.config/yln/config.toml)")
-	}
-
-	// Resolve to absolute path
-	monorepoPath, err := filepath.Abs(monorepoPath)
+	monorepo, err := resolveMonorepo(monorepoPath)
 	if err != nil {
-		return fmt.Errorf("resolving monorepo path: %w", err)
+		return err
 	}
 
 	// Check node_modules exists
-	if _, err := os.Stat(nodeModulesDir); err != nil {
+	if _, err := os.Stat(nmDir); err != nil {
 		return fmt.Errorf("node_modules not found in current directory (run yarn install first)")
-	}
-
-	// Load monorepo
-	monorepo, err := LoadMonorepo(monorepoPath)
-	if err != nil {
-		return fmt.Errorf("loading monorepo: %w", err)
 	}
 
 	// Validate requested packages exist in the monorepo
@@ -137,5 +146,5 @@ func cmdLink(args []string, nodeModulesDir string) error {
 	}
 
 	fmt.Println("Linking packages:")
-	return Link(monorepo, nodeModulesDir, packages)
+	return Link(monorepo, nmDir, packages)
 }

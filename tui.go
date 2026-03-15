@@ -1,0 +1,213 @@
+package main
+
+import (
+	"fmt"
+	"io"
+	"sort"
+	"strings"
+
+	"github.com/charmbracelet/bubbles/key"
+	"github.com/charmbracelet/bubbles/list"
+	tea "github.com/charmbracelet/bubbletea"
+	"github.com/charmbracelet/lipgloss"
+)
+
+// workspaceItem implements list.Item and list.DefaultItem for the workspace picker.
+type workspaceItem struct {
+	name string
+	dir  string
+}
+
+func (w workspaceItem) FilterValue() string { return w.name }
+func (w workspaceItem) Title() string       { return w.name }
+func (w workspaceItem) Description() string { return w.dir }
+
+// checkboxDelegate wraps the default delegate to add a checkbox prefix.
+type checkboxDelegate struct {
+	inner    list.DefaultDelegate
+	selected map[string]bool
+}
+
+func newCheckboxDelegate(selected map[string]bool) checkboxDelegate {
+	d := list.NewDefaultDelegate()
+	d.ShowDescription = true
+	d.SetSpacing(0)
+	return checkboxDelegate{inner: d, selected: selected}
+}
+
+func (d checkboxDelegate) Height() int  { return d.inner.Height() }
+func (d checkboxDelegate) Spacing() int { return d.inner.Spacing() }
+
+func (d checkboxDelegate) Update(msg tea.Msg, m *list.Model) tea.Cmd {
+	return d.inner.Update(msg, m)
+}
+
+func (d checkboxDelegate) Render(w io.Writer, m list.Model, index int, item list.Item) {
+	wi, ok := item.(workspaceItem)
+	if !ok {
+		return
+	}
+
+	isSelected := d.selected[wi.name]
+	isCurrent := index == m.Index()
+
+	checkbox := "[ ]"
+	if isSelected {
+		checkbox = "[x]"
+	}
+
+	titleStyle := d.inner.Styles.NormalTitle
+	descStyle := d.inner.Styles.NormalDesc
+	if isCurrent {
+		titleStyle = d.inner.Styles.SelectedTitle
+		descStyle = d.inner.Styles.SelectedDesc
+	}
+
+	title := fmt.Sprintf("%s %s", checkbox, wi.name)
+	desc := fmt.Sprintf("    %s", wi.dir)
+
+	fmt.Fprintf(w, "%s\n%s", titleStyle.Render(title), descStyle.Render(desc))
+}
+
+// tuiModel is the Bubble Tea model for the workspace picker.
+type tuiModel struct {
+	list     list.Model
+	selected map[string]bool
+	done     bool
+	aborted  bool
+}
+
+func initialModel(items []list.Item) tuiModel {
+	selected := make(map[string]bool)
+
+	delegate := newCheckboxDelegate(selected)
+	l := list.New(items, delegate, 80, 24)
+	l.Title = "Select packages to link (space=toggle, enter=confirm)"
+	l.SetFilteringEnabled(true)
+	l.DisableQuitKeybindings()
+
+	l.AdditionalShortHelpKeys = func() []key.Binding {
+		return []key.Binding{
+			key.NewBinding(key.WithKeys(" "), key.WithHelp("space", "toggle")),
+			key.NewBinding(key.WithKeys("enter"), key.WithHelp("enter", "confirm")),
+			key.NewBinding(key.WithKeys("esc"), key.WithHelp("esc", "abort")),
+		}
+	}
+
+	return tuiModel{
+		list:     l,
+		selected: selected,
+	}
+}
+
+func (m tuiModel) Init() tea.Cmd {
+	return nil
+}
+
+func (m tuiModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
+	switch msg := msg.(type) {
+	case tea.WindowSizeMsg:
+		m.list.SetSize(msg.Width, msg.Height)
+		return m, nil
+
+	case tea.KeyMsg:
+		// Don't handle keys when filtering is active (let the filter input handle them)
+		if m.list.FilterState() == list.Filtering {
+			break
+		}
+
+		switch msg.String() {
+		case " ":
+			if item, ok := m.list.SelectedItem().(workspaceItem); ok {
+				if m.selected[item.name] {
+					delete(m.selected, item.name)
+				} else {
+					m.selected[item.name] = true
+				}
+			}
+			return m, nil
+
+		case "enter":
+			m.done = true
+			return m, tea.Quit
+
+		case "ctrl+c", "esc":
+			m.aborted = true
+			return m, tea.Quit
+		}
+	}
+
+	var cmd tea.Cmd
+	m.list, cmd = m.list.Update(msg)
+	return m, cmd
+}
+
+func (m tuiModel) View() string {
+	if m.done || m.aborted {
+		return ""
+	}
+
+	var b strings.Builder
+	b.WriteString(m.list.View())
+
+	// Show selected count at the bottom
+	count := len(m.selected)
+	if count > 0 {
+		style := lipgloss.NewStyle().Foreground(lipgloss.Color("170")).Bold(true)
+		b.WriteString("\n")
+		b.WriteString(style.Render(fmt.Sprintf("  %d package(s) selected", count)))
+	}
+
+	return b.String()
+}
+
+// cmdTUI launches the interactive TUI for selecting packages to link.
+func cmdTUI(monorepoPath, nodeModulesDir string) error {
+	monorepo, err := resolveMonorepo(monorepoPath)
+	if err != nil {
+		return err
+	}
+
+	// Build sorted list of workspace items
+	var items []list.Item
+	for name, ws := range monorepo.Workspaces {
+		items = append(items, workspaceItem{name: name, dir: ws.Dir})
+	}
+	sort.Slice(items, func(i, j int) bool {
+		return items[i].(workspaceItem).name < items[j].(workspaceItem).name
+	})
+
+	if len(items) == 0 {
+		return fmt.Errorf("no workspace packages found in monorepo")
+	}
+
+	model := initialModel(items)
+	p := tea.NewProgram(model, tea.WithAltScreen())
+	finalModel, err := p.Run()
+	if err != nil {
+		return fmt.Errorf("running TUI: %w", err)
+	}
+
+	m := finalModel.(tuiModel)
+	if m.aborted {
+		fmt.Println("Aborted.")
+		return nil
+	}
+
+	// Collect selected packages
+	var packages []string
+	for name := range m.selected {
+		if _, ok := monorepo.Workspaces[name]; ok {
+			packages = append(packages, name)
+		}
+	}
+	sort.Strings(packages)
+
+	if len(packages) == 0 {
+		fmt.Println("No packages selected.")
+		return nil
+	}
+
+	fmt.Println("Linking packages:")
+	return Link(monorepo, nodeModulesDir, packages)
+}
