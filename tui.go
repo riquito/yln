@@ -3,6 +3,7 @@ package main
 import (
 	"fmt"
 	"io"
+	"os"
 	"sort"
 	"strings"
 
@@ -162,10 +163,17 @@ func (m tuiModel) View() string {
 }
 
 // cmdTUI launches the interactive TUI for selecting packages to link.
-func cmdTUI(monorepoPath, nodeModulesDir string) error {
+func cmdTUI(monorepoPath, nodeModulesDir string, dryRun bool) error {
 	monorepo, err := resolveMonorepo(monorepoPath)
 	if err != nil {
 		return err
+	}
+
+	// Check node_modules exists (skip in dry-run mode)
+	if !dryRun {
+		if _, err := os.Stat(nodeModulesDir); err != nil {
+			return fmt.Errorf("node_modules not found in current directory (run yarn install first)")
+		}
 	}
 
 	// Build sorted list of workspace items
@@ -190,7 +198,7 @@ func cmdTUI(monorepoPath, nodeModulesDir string) error {
 
 	m := finalModel.(tuiModel)
 	if m.aborted {
-		fmt.Println("Aborted.")
+		printInfo("Aborted.")
 		return nil
 	}
 
@@ -204,10 +212,14 @@ func cmdTUI(monorepoPath, nodeModulesDir string) error {
 	sort.Strings(packages)
 
 	if len(packages) == 0 {
-		fmt.Println("No packages selected.")
+		printInfo("No packages selected.")
 		return nil
 	}
 
-	fmt.Println("Linking packages:")
-	return Link(monorepo, nodeModulesDir, packages)
+	if dryRun {
+		printHeader("Would link packages (dry run):")
+	} else {
+		printHeader("Linking packages:")
+	}
+	return Link(monorepo, nodeModulesDir, packages, dryRun)
 }

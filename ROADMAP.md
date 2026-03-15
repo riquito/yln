@@ -140,10 +140,10 @@ manual symlink approach.
 
 ### v0.3 — Polish
 
-- [ ] Pre-link validation (check app has `node_modules/`, packages exist, etc.)
-- [ ] Colored output and progress feedback
-- [ ] `--dry-run` flag
-- [ ] Handle edge cases (nested `node_modules/`, scoped packages)
+- [x] Pre-link validation (check app has `node_modules/`, packages exist, etc.)
+- [x] Colored output and progress feedback
+- [x] `--dry-run` flag
+- [x] Handle edge cases (nested `node_modules/`, scoped packages)
 
 ### Future ideas
 

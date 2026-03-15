@@ -96,7 +96,7 @@ func RemoveLinks(nodeModulesDir string) error {
 	}
 
 	if len(links) == 0 {
-		fmt.Println("No symlinks found.")
+		printInfo("No symlinks found.")
 		return nil
 	}
 
@@ -105,7 +105,7 @@ func RemoveLinks(nodeModulesDir string) error {
 		if err := os.Remove(path); err != nil {
 			return fmt.Errorf("removing symlink %s: %w", path, err)
 		}
-		fmt.Printf("  removed %s\n", link.Name)
+		printRemoved(link.Name)
 	}
 
 	return nil

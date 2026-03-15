@@ -7,18 +7,19 @@ import (
 )
 
 // Link creates symlinks in nodeModulesDir for each requested package and its
-// transitive workspace dependencies.
-func Link(monorepo *Monorepo, nodeModulesDir string, packageNames []string) error {
+// transitive workspace dependencies. If dryRun is true, it prints what would
+// be linked without making any changes.
+func Link(monorepo *Monorepo, nodeModulesDir string, packageNames []string, dryRun bool) error {
 	visited := make(map[string]bool)
 	for _, name := range packageNames {
-		if err := linkRecursive(monorepo, nodeModulesDir, name, visited); err != nil {
+		if err := linkRecursive(monorepo, nodeModulesDir, name, visited, dryRun); err != nil {
 			return err
 		}
 	}
 	return nil
 }
 
-func linkRecursive(monorepo *Monorepo, nodeModulesDir, pkgName string, visited map[string]bool) error {
+func linkRecursive(monorepo *Monorepo, nodeModulesDir, pkgName string, visited map[string]bool, dryRun bool) error {
 	if visited[pkgName] {
 		return nil // already linked or cycle
 	}
@@ -31,29 +32,33 @@ func linkRecursive(monorepo *Monorepo, nodeModulesDir, pkgName string, visited m
 
 	targetPath := filepath.Join(nodeModulesDir, pkgName)
 
-	// Handle scoped packages: ensure @scope/ directory exists
-	if pkgName[0] == '@' {
-		scopeDir := filepath.Dir(targetPath)
-		if err := os.MkdirAll(scopeDir, 0o755); err != nil {
-			return fmt.Errorf("creating scope directory %s: %w", scopeDir, err)
+	if dryRun {
+		printDryRun(pkgName, ws.Dir)
+	} else {
+		// Handle scoped packages: ensure @scope/ directory exists
+		if pkgName[0] == '@' {
+			scopeDir := filepath.Dir(targetPath)
+			if err := os.MkdirAll(scopeDir, 0o755); err != nil {
+				return fmt.Errorf("creating scope directory %s: %w", scopeDir, err)
+			}
 		}
-	}
 
-	// Remove existing entry (file, dir, or symlink)
-	if err := os.RemoveAll(targetPath); err != nil {
-		return fmt.Errorf("removing %s: %w", targetPath, err)
-	}
+		// Remove existing entry (file, dir, or symlink)
+		if err := os.RemoveAll(targetPath); err != nil {
+			return fmt.Errorf("removing %s: %w", targetPath, err)
+		}
 
-	// Create symlink
-	if err := os.Symlink(ws.Dir, targetPath); err != nil {
-		return fmt.Errorf("creating symlink %s -> %s: %w", targetPath, ws.Dir, err)
-	}
+		// Create symlink
+		if err := os.Symlink(ws.Dir, targetPath); err != nil {
+			return fmt.Errorf("creating symlink %s -> %s: %w", targetPath, ws.Dir, err)
+		}
 
-	fmt.Printf("  linked %s -> %s\n", pkgName, ws.Dir)
+		printLinked(pkgName, ws.Dir)
+	}
 
 	// Recurse into workspace dependencies
 	for _, dep := range ws.WorkDeps {
-		if err := linkRecursive(monorepo, nodeModulesDir, dep, visited); err != nil {
+		if err := linkRecursive(monorepo, nodeModulesDir, dep, visited, dryRun); err != nil {
 			return err
 		}
 	}

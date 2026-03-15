@@ -9,13 +9,14 @@ import (
 const usage = `yln — yarn linker
 
 Usage:
-  yln [--monorepo <path>]                     Interactive package picker
-  yln <pkg1> [pkg2...] [--monorepo <path>]    Link packages from a monorepo
-  yln list                                    Show currently linked packages
-  yln clean                                   Remove all symlinks
+  yln [--monorepo <path>] [--dry-run]                     Interactive package picker
+  yln <pkg1> [pkg2...] [--monorepo <path>] [--dry-run]    Link packages from a monorepo
+  yln list                                                 Show currently linked packages
+  yln clean                                                Remove all symlinks
 
 Options:
   --monorepo <path>   Path to the monorepo root (overrides config file)
+  --dry-run           Show what would be linked without making changes
 
 Config file: ~/.config/yln/config.toml
   monorepo = "/path/to/monorepo"
@@ -90,12 +91,12 @@ func cmdList(nodeModulesDir string) error {
 	}
 
 	if len(links) == 0 {
-		fmt.Println("No symlinks found in node_modules/")
+		printInfo("No symlinks found in node_modules/")
 		return nil
 	}
 
 	for _, link := range links {
-		fmt.Printf("  %s -> %s\n", link.Name, link.Target)
+		fmt.Printf("  %s → %s\n", link.Name, dimStyle.Render(link.Target))
 	}
 	return nil
 }
@@ -107,25 +108,29 @@ func cmdClean(nodeModulesDir string) error {
 func cmdLink(args []string, nmDir string) error {
 	var monorepoPath string
 	var packages []string
+	var dryRun bool
 
 	for i := 0; i < len(args); i++ {
-		if args[i] == "--monorepo" {
+		switch args[i] {
+		case "--monorepo":
 			if i+1 >= len(args) {
 				return fmt.Errorf("--monorepo requires a path argument")
 			}
 			i++
 			monorepoPath = args[i]
-		} else if args[i] == "--help" || args[i] == "-h" {
+		case "--dry-run":
+			dryRun = true
+		case "--help", "-h":
 			fmt.Print(usage)
 			return nil
-		} else {
+		default:
 			packages = append(packages, args[i])
 		}
 	}
 
 	// No packages specified: launch interactive TUI
 	if len(packages) == 0 {
-		return cmdTUI(monorepoPath, nmDir)
+		return cmdTUI(monorepoPath, nmDir, dryRun)
 	}
 
 	monorepo, err := resolveMonorepo(monorepoPath)
@@ -133,9 +138,11 @@ func cmdLink(args []string, nmDir string) error {
 		return err
 	}
 
-	// Check node_modules exists
-	if _, err := os.Stat(nmDir); err != nil {
-		return fmt.Errorf("node_modules not found in current directory (run yarn install first)")
+	// Check node_modules exists (skip in dry-run mode)
+	if !dryRun {
+		if _, err := os.Stat(nmDir); err != nil {
+			return fmt.Errorf("node_modules not found in current directory (run yarn install first)")
+		}
 	}
 
 	// Validate requested packages exist in the monorepo
@@ -145,6 +152,10 @@ func cmdLink(args []string, nmDir string) error {
 		}
 	}
 
-	fmt.Println("Linking packages:")
-	return Link(monorepo, nmDir, packages)
+	if dryRun {
+		printHeader("Would link packages (dry run):")
+	} else {
+		printHeader("Linking packages:")
+	}
+	return Link(monorepo, nmDir, packages, dryRun)
 }

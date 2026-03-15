@@ -107,7 +107,7 @@ func TestLinkAndScanAndClean(t *testing.T) {
 	}
 
 	// Link only lodash-es — should also link underscore (transitive) but NOT ramda
-	if err := Link(m, nodeModulesDir, []string{"lodash-es"}); err != nil {
+	if err := Link(m, nodeModulesDir, []string{"lodash-es"}, false); err != nil {
 		t.Fatalf("Link: %v", err)
 	}
 
@@ -182,6 +182,106 @@ func TestIsWorkspaceVersion(t *testing.T) {
 			t.Errorf("isWorkspaceVersion(%q) = %v, want %v", tt.version, got, tt.want)
 		}
 	}
+}
+
+func TestDryRun(t *testing.T) {
+	projectsDir := testdataDir(t)
+	monorepoDir := filepath.Join(projectsDir, "monorepo-yarn4")
+
+	m, err := LoadMonorepo(monorepoDir)
+	if err != nil {
+		t.Fatalf("LoadMonorepo: %v", err)
+	}
+
+	tmpDir := t.TempDir()
+	nodeModulesDir := filepath.Join(tmpDir, "node_modules")
+	if err := os.MkdirAll(nodeModulesDir, 0o755); err != nil {
+		t.Fatalf("creating node_modules: %v", err)
+	}
+
+	// Create a fake existing dir for lodash-es
+	lodashDir := filepath.Join(nodeModulesDir, "lodash-es")
+	if err := os.MkdirAll(lodashDir, 0o755); err != nil {
+		t.Fatalf("creating fake lodash-es: %v", err)
+	}
+	os.WriteFile(filepath.Join(lodashDir, "marker.txt"), []byte("real"), 0o644)
+
+	// Dry-run should NOT create any symlinks
+	if err := Link(m, nodeModulesDir, []string{"lodash-es"}, true); err != nil {
+		t.Fatalf("Link dry-run: %v", err)
+	}
+
+	// lodash-es should still be a regular directory, not a symlink
+	fi, err := os.Lstat(filepath.Join(nodeModulesDir, "lodash-es"))
+	if err != nil {
+		t.Fatalf("lstat lodash-es: %v", err)
+	}
+	if fi.Mode()&os.ModeSymlink != 0 {
+		t.Error("lodash-es should NOT be a symlink after dry-run, but it is")
+	}
+
+	// marker.txt should still exist (directory wasn't replaced)
+	if _, err := os.Stat(filepath.Join(lodashDir, "marker.txt")); err != nil {
+		t.Error("marker.txt should still exist after dry-run")
+	}
+
+	// underscore (transitive dep) should not exist as symlink either
+	underscorePath := filepath.Join(nodeModulesDir, "underscore")
+	if _, err := os.Lstat(underscorePath); err == nil {
+		fi, _ := os.Lstat(underscorePath)
+		if fi.Mode()&os.ModeSymlink != 0 {
+			t.Error("underscore should NOT be a symlink after dry-run")
+		}
+	}
+}
+
+func TestScopedPackageLink(t *testing.T) {
+	// Create a minimal monorepo with a scoped package in a temp dir
+	tmpDir := t.TempDir()
+
+	// Create a fake workspace package @scope/pkg
+	pkgDir := filepath.Join(tmpDir, "monorepo", "packages", "scoped-pkg")
+	if err := os.MkdirAll(pkgDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	os.WriteFile(filepath.Join(pkgDir, "package.json"), []byte(`{"name": "@scope/pkg", "version": "1.0.0"}`), 0o644)
+
+	// Create monorepo root package.json
+	monorepoDir := filepath.Join(tmpDir, "monorepo")
+	os.WriteFile(filepath.Join(monorepoDir, "package.json"), []byte(`{"private": true, "workspaces": ["packages/*"]}`), 0o644)
+
+	m, err := LoadMonorepo(monorepoDir)
+	if err != nil {
+		t.Fatalf("LoadMonorepo: %v", err)
+	}
+
+	if _, ok := m.Workspaces["@scope/pkg"]; !ok {
+		t.Fatalf("expected @scope/pkg workspace, got workspaces: %v", m.Workspaces)
+	}
+
+	// Create node_modules dir
+	nodeModulesDir := filepath.Join(tmpDir, "app", "node_modules")
+	if err := os.MkdirAll(nodeModulesDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	// Link the scoped package
+	if err := Link(m, nodeModulesDir, []string{"@scope/pkg"}, false); err != nil {
+		t.Fatalf("Link: %v", err)
+	}
+
+	// Verify @scope/ directory was created
+	scopeDir := filepath.Join(nodeModulesDir, "@scope")
+	fi, err := os.Stat(scopeDir)
+	if err != nil {
+		t.Fatalf("@scope/ directory not created: %v", err)
+	}
+	if !fi.IsDir() {
+		t.Fatal("@scope/ should be a directory")
+	}
+
+	// Verify @scope/pkg is a symlink to the right target
+	assertSymlink(t, filepath.Join(nodeModulesDir, "@scope", "pkg"), pkgDir)
 }
 
 func assertSymlink(t *testing.T, path, expectedTarget string) {
