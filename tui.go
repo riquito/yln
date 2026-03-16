@@ -78,8 +78,8 @@ type tuiModel struct {
 	aborted  bool
 }
 
-func initialModel(items []list.Item) tuiModel {
-	selected := make(map[string]bool)
+func initialModel(items []list.Item, preSelected map[string]bool) tuiModel {
+	selected := preSelected
 
 	delegate := newCheckboxDelegate(selected)
 	l := list.New(items, delegate, 80, 24)
@@ -176,20 +176,37 @@ func cmdTUI(monorepoPath, nodeModulesDir string, dryRun bool) error {
 		}
 	}
 
-	// Build sorted list of workspace items
+	// Load existing state to pre-select previously requested packages
+	preSelected := make(map[string]bool)
+	if state, err := loadLinkState(nodeModulesDir); err == nil && state != nil {
+		for _, pkg := range state.Requested {
+			if _, ok := monorepo.Workspaces[pkg]; ok {
+				preSelected[pkg] = true
+			}
+		}
+	}
+
+	// Build list of workspace items, selected first then alphabetical
 	var items []list.Item
 	for name, ws := range monorepo.Workspaces {
 		items = append(items, workspaceItem{name: name, dir: ws.Dir})
 	}
 	sort.Slice(items, func(i, j int) bool {
-		return items[i].(workspaceItem).name < items[j].(workspaceItem).name
+		ni := items[i].(workspaceItem).name
+		nj := items[j].(workspaceItem).name
+		si := preSelected[ni]
+		sj := preSelected[nj]
+		if si != sj {
+			return si // selected items first
+		}
+		return ni < nj
 	})
 
 	if len(items) == 0 {
 		return fmt.Errorf("no workspace packages found in monorepo")
 	}
 
-	model := initialModel(items)
+	model := initialModel(items, preSelected)
 	p := tea.NewProgram(model, tea.WithAltScreen())
 	finalModel, err := p.Run()
 	if err != nil {
