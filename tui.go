@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"path/filepath"
 	"sort"
 	"strings"
 
@@ -228,26 +229,63 @@ func cmdTUI(monorepoPath, nodeModulesDir string, dryRun bool) error {
 	}
 	sort.Strings(packages)
 
-	if len(packages) == 0 {
+	if len(packages) == 0 && len(preSelected) == 0 {
 		printInfo("No packages selected.")
 		return nil
 	}
 
-	if dryRun {
-		printHeader("Would link packages (dry run):")
-	} else {
-		printHeader("Linking packages:")
+	// Remove symlinks that are no longer needed
+	if !dryRun {
+		newResolved := make(map[string]bool)
+		for _, name := range ResolveLinkSet(monorepo, packages) {
+			newResolved[name] = true
+		}
+
+		oldLinks, err := ScanLinks(nodeModulesDir)
+		if err != nil {
+			return err
+		}
+
+		removedAny := false
+		for _, link := range oldLinks {
+			if !newResolved[link.Name] {
+				path := filepath.Join(nodeModulesDir, link.Name)
+				if err := os.Remove(path); err != nil {
+					return fmt.Errorf("removing symlink %s: %w", path, err)
+				}
+				printRemoved(link.Name)
+				removedAny = true
+			}
+		}
+
+		if removedAny && len(packages) == 0 {
+			if err := deleteLinkState(nodeModulesDir); err != nil {
+				return err
+			}
+			fmt.Println(warnStyle.Render("Run 'yarn install' to restore removed packages."))
+			return nil
+		}
 	}
-	if err := Link(monorepo, nodeModulesDir, packages, dryRun); err != nil {
-		return err
+
+	if len(packages) > 0 {
+		if dryRun {
+			printHeader("Would link packages (dry run):")
+		} else {
+			printHeader("Linking packages:")
+		}
+		if err := Link(monorepo, nodeModulesDir, packages, dryRun); err != nil {
+			return err
+		}
 	}
 
 	if !dryRun {
-		if err := saveLinkState(nodeModulesDir, &LinkState{
-			Monorepo:  monorepo.RootDir,
-			Requested: packages,
-		}); err != nil {
-			return err
+		if len(packages) > 0 {
+			if err := saveLinkState(nodeModulesDir, &LinkState{
+				Monorepo:  monorepo.RootDir,
+				Requested: packages,
+			}); err != nil {
+				return err
+			}
 		}
 	}
 
