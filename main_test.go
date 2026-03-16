@@ -19,7 +19,7 @@ func testdataDir(t *testing.T) string {
 	if !ok {
 		t.Fatal("cannot determine test file location")
 	}
-	return filepath.Join(filepath.Dir(filename), "..", "projects")
+	return filepath.Join(filepath.Dir(filename), "testdata")
 }
 
 func TestLoadMonorepo(t *testing.T) {
