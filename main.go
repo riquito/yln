@@ -9,13 +9,15 @@ import (
 const usage = `yln — yarn linker
 
 Usage:
-  yln [--monorepo <path>] [--dry-run]                     Interactive package picker
-  yln <pkg1> [pkg2...] [--monorepo <path>] [--dry-run]    Link packages from a monorepo
-  yln list                                                 Show currently linked packages
-  yln clean                                                Remove all symlinks
-  yln watch [--monorepo <path>]                             Watch linked packages for changes
-  yln stash [--monorepo <path>]                            Save links and remove them
-  yln pop [--monorepo <path>]                              Restore previously stashed links
+  yln add <pkg1> [pkg2...] [--monorepo <path>] [--dry-run]   Link packages from a monorepo
+  yln edit [--monorepo <path>] [--dry-run]                    Interactive package picker (TUI)
+  yln rm <pkg1> [pkg2...] [--monorepo <path>]                 Remove specific package links
+  yln status                                                  Show currently linked packages
+  yln clean                                                   Remove all symlinks
+  yln watch [--monorepo <path>]                               Watch linked packages for changes
+  yln stash [--monorepo <path>]                               Save links and remove them
+  yln pop [--monorepo <path>]                                 Restore previously stashed links
+  yln check                                                   Exit 1 if yln symlinks found
 
 Options:
   --monorepo <path>   Path to the monorepo root (overrides config file)
@@ -34,12 +36,19 @@ func main() {
 
 func run(args []string) error {
 	if len(args) == 0 {
-		return cmdLink(args, nodeModulesDir())
+		fmt.Print(usage)
+		return nil
 	}
 
 	switch args[0] {
-	case "list":
-		return cmdList(nodeModulesDir())
+	case "add":
+		return cmdAdd(args[1:], nodeModulesDir())
+	case "edit":
+		return cmdEdit(args[1:], nodeModulesDir())
+	case "rm":
+		return cmdRm(args[1:], nodeModulesDir())
+	case "status":
+		return cmdStatus(nodeModulesDir())
 	case "clean":
 		return cmdClean(nodeModulesDir())
 	case "watch":
@@ -48,11 +57,13 @@ func run(args []string) error {
 		return cmdStash(args[1:], nodeModulesDir())
 	case "pop":
 		return cmdPop(args[1:], nodeModulesDir())
+	case "check":
+		return cmdCheck(nodeModulesDir())
 	case "--help", "-h":
 		fmt.Print(usage)
 		return nil
 	default:
-		return cmdLink(args, nodeModulesDir())
+		return fmt.Errorf("unknown command %q (see 'yln --help' for usage)", args[0])
 	}
 }
 
@@ -93,7 +104,7 @@ func resolveMonorepo(monorepoPath string) (*Monorepo, error) {
 	return monorepo, nil
 }
 
-func cmdList(nodeModulesDir string) error {
+func cmdStatus(nodeModulesDir string) error {
 	links, err := ScanLinks(nodeModulesDir)
 	if err != nil {
 		return err
@@ -117,7 +128,7 @@ func cmdClean(nodeModulesDir string) error {
 	return deleteLinkState(nodeModulesDir)
 }
 
-func cmdLink(args []string, nmDir string) error {
+func cmdAdd(args []string, nmDir string) error {
 	var monorepoPath string
 	var packages []string
 	var dryRun bool
@@ -140,9 +151,8 @@ func cmdLink(args []string, nmDir string) error {
 		}
 	}
 
-	// No packages specified: launch interactive TUI
 	if len(packages) == 0 {
-		return cmdTUI(monorepoPath, nmDir, dryRun)
+		return fmt.Errorf("no packages specified (usage: yln add <pkg1> [pkg2...])")
 	}
 
 	monorepo, err := resolveMonorepo(monorepoPath)
@@ -183,4 +193,162 @@ func cmdLink(args []string, nmDir string) error {
 	}
 
 	return nil
+}
+
+func cmdEdit(args []string, nmDir string) error {
+	var monorepoPath string
+	var dryRun bool
+
+	for i := 0; i < len(args); i++ {
+		switch args[i] {
+		case "--monorepo":
+			if i+1 >= len(args) {
+				return fmt.Errorf("--monorepo requires a path argument")
+			}
+			i++
+			monorepoPath = args[i]
+		case "--dry-run":
+			dryRun = true
+		case "--help", "-h":
+			fmt.Print(usage)
+			return nil
+		default:
+			return fmt.Errorf("unexpected argument %q (usage: yln edit [--monorepo <path>] [--dry-run])", args[i])
+		}
+	}
+
+	return cmdTUI(monorepoPath, nmDir, dryRun)
+}
+
+func cmdRm(args []string, nmDir string) error {
+	var monorepoPath string
+	var packages []string
+
+	for i := 0; i < len(args); i++ {
+		switch args[i] {
+		case "--monorepo":
+			if i+1 >= len(args) {
+				return fmt.Errorf("--monorepo requires a path argument")
+			}
+			i++
+			monorepoPath = args[i]
+		case "--help", "-h":
+			fmt.Print(usage)
+			return nil
+		default:
+			packages = append(packages, args[i])
+		}
+	}
+
+	if len(packages) == 0 {
+		return fmt.Errorf("no packages specified (usage: yln rm <pkg1> [pkg2...])")
+	}
+
+	// Verify named packages are currently linked
+	links, err := ScanLinks(nmDir)
+	if err != nil {
+		return err
+	}
+	linkedSet := make(map[string]bool, len(links))
+	for _, link := range links {
+		linkedSet[link.Name] = true
+	}
+	for _, pkg := range packages {
+		if !linkedSet[pkg] {
+			return fmt.Errorf("package %q is not currently linked", pkg)
+		}
+	}
+
+	// Remove specified symlinks
+	for _, pkg := range packages {
+		path := filepath.Join(nmDir, pkg)
+		if err := os.Remove(path); err != nil {
+			return fmt.Errorf("removing symlink %s: %w", path, err)
+		}
+		printRemoved(pkg)
+	}
+
+	// Update state: remove specified packages from requested set
+	state, err := loadLinkState(nmDir)
+	if err != nil {
+		return err
+	}
+
+	if state != nil {
+		removeSet := make(map[string]bool, len(packages))
+		for _, pkg := range packages {
+			removeSet[pkg] = true
+		}
+
+		var remaining []string
+		for _, req := range state.Requested {
+			if !removeSet[req] {
+				remaining = append(remaining, req)
+			}
+		}
+
+		if len(remaining) == 0 {
+			// Nothing left, clean up all symlinks and state
+			if err := RemoveLinks(nmDir); err != nil {
+				return err
+			}
+			if err := deleteLinkState(nmDir); err != nil {
+				return err
+			}
+		} else {
+			// Resolve the new link set and remove orphaned transitive deps
+			monorepo, err := resolveMonorepo(monorepoPath)
+			if err != nil {
+				return err
+			}
+			newSet := ResolveLinkSet(monorepo, remaining)
+			needed := make(map[string]bool, len(newSet))
+			for _, name := range newSet {
+				needed[name] = true
+			}
+
+			// Remove symlinks that are no longer needed
+			currentLinks, err := ScanLinks(nmDir)
+			if err != nil {
+				return err
+			}
+			for _, link := range currentLinks {
+				if !needed[link.Name] {
+					path := filepath.Join(nmDir, link.Name)
+					if err := os.Remove(path); err != nil {
+						return fmt.Errorf("removing orphaned symlink %s: %w", path, err)
+					}
+					printRemoved(link.Name)
+				}
+			}
+
+			if err := saveLinkState(nmDir, &LinkState{
+				Monorepo:  state.Monorepo,
+				Requested: remaining,
+			}); err != nil {
+				return err
+			}
+		}
+	}
+
+	fmt.Println(warnStyle.Render("Run 'yarn install' to restore removed packages."))
+	return nil
+}
+
+func cmdCheck(nmDir string) error {
+	links, err := ScanLinks(nmDir)
+	if err != nil {
+		return err
+	}
+
+	if len(links) == 0 {
+		printInfo("No yln symlinks found.")
+		return nil
+	}
+
+	printHeader("Found yln symlinks:")
+	for _, link := range links {
+		fmt.Printf("  %s → %s\n", link.Name, dimStyle.Render(link.Target))
+	}
+	return fmt.Errorf("found %d yln symlink(s) in node_modules", len(links))
 }
