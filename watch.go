@@ -6,12 +6,52 @@ import (
 	"os/signal"
 	"path/filepath"
 	"sort"
+	"strconv"
 	"strings"
 	"syscall"
 	"time"
 
 	"github.com/fsnotify/fsnotify"
 )
+
+const watchLockFile = ".yln-watch.lock"
+
+// acquireWatchLock creates a PID lockfile. Returns a cleanup function.
+func acquireWatchLock(nmDir string) (func(), error) {
+	path := filepath.Join(nmDir, watchLockFile)
+
+	// Check for existing lock
+	data, err := os.ReadFile(path)
+	if err == nil {
+		pid, err := strconv.Atoi(strings.TrimSpace(string(data)))
+		if err == nil {
+			// Check if process is still alive
+			proc, err := os.FindProcess(pid)
+			if err == nil {
+				// Signal 0 checks existence without actually signaling
+				if err := proc.Signal(syscall.Signal(0)); err == nil {
+					return nil, fmt.Errorf("another yln watch is already running (pid %d)", pid)
+				}
+			}
+		}
+		// Stale lock, remove it
+		os.Remove(path)
+	}
+
+	// Write our PID
+	if err := os.WriteFile(path, []byte(strconv.Itoa(os.Getpid())+"\n"), 0o644); err != nil {
+		return nil, fmt.Errorf("creating watch lock: %w", err)
+	}
+
+	cleanup := func() {
+		os.Remove(path)
+	}
+	return cleanup, nil
+}
+
+func releaseWatchLock(nmDir string) {
+	os.Remove(filepath.Join(nmDir, watchLockFile))
+}
 
 type watchedPackage struct {
 	name        string
@@ -45,6 +85,13 @@ func cmdWatch(args []string, nmDir string) error {
 			return fmt.Errorf("unknown argument: %s", args[i])
 		}
 	}
+
+	// Acquire watch lock to prevent duplicate watchers
+	unlock, err := acquireWatchLock(nmDir)
+	if err != nil {
+		return err
+	}
+	defer unlock()
 
 	monorepo, err := resolveMonorepo(monorepoPath)
 	if err != nil {
