@@ -9,9 +9,9 @@ import (
 const usage = `yln — yarn linker
 
 Usage:
-  yln add <pkg1> [pkg2...] [--monorepo <path>] [--dry-run]   Link packages from a monorepo
-  yln edit [--monorepo <path>] [--dry-run]                    Interactive package picker (TUI)
+  yln add <pkg1> [pkg2...] [--monorepo <path>] [--dry-run]    Link packages from a monorepo
   yln rm <pkg1> [pkg2...] [--monorepo <path>]                 Remove specific package links
+  yln edit [--monorepo <path>] [--dry-run]                    Interactive package picker (TUI)
   yln status                                                  Show currently linked packages
   yln clean                                                   Remove all symlinks
   yln watch [--monorepo <path>]                               Watch linked packages for changes
