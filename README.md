@@ -19,9 +19,6 @@ Don't forget to add it somewhere in your `$PATH` for easy usage, e.g.
 ln -s $PWD/yln ~/.local/bin
 ```
 
-```sh
-https://github.com/riquito/yln/releases
-
 ## Configuration
 
 It's suggested to use a configuration file to define a alias to the monorepo you work with
