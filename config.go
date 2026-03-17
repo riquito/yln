@@ -10,6 +10,7 @@ import (
 // Config holds yln configuration.
 type Config struct {
 	Monorepo string
+	Alias    string // display alias for the monorepo (e.g. "my-mono" → <my-mono>/packages/...)
 }
 
 // LoadConfig reads the config from ~/.config/yln/config.toml.
@@ -38,19 +39,22 @@ func LoadConfig() (*Config, error) {
 			continue
 		}
 
-		if strings.HasPrefix(line, "monorepo") {
-			parts := strings.SplitN(line, "=", 2)
-			if len(parts) != 2 {
-				continue
-			}
-			val := strings.TrimSpace(parts[1])
-			// Strip quotes
-			val = strings.Trim(val, `"'`)
-			// Expand ~
+		parts := strings.SplitN(line, "=", 2)
+		if len(parts) != 2 {
+			continue
+		}
+		key := strings.TrimSpace(parts[0])
+		val := strings.TrimSpace(parts[1])
+		val = strings.Trim(val, `"'`)
+
+		switch key {
+		case "monorepo":
 			if strings.HasPrefix(val, "~/") {
 				val = filepath.Join(home, val[2:])
 			}
 			cfg.Monorepo = val
+		case "alias":
+			cfg.Alias = val
 		}
 	}
 

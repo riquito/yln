@@ -19,7 +19,10 @@ Set a default monorepo path in `~/.config/yln/config.toml`:
 
 ```toml
 monorepo = "~/projects/my-monorepo"
+alias = "mono"  # optional: shown in status/check output as <mono>/packages/...
 ```
+
+Without an alias, `yln status` uses the directory basename (e.g. `<my-monorepo>/packages/pkg-a`).
 
 If you don't do that, you will have to add `--monorepo <path>` to most of the commands.
 

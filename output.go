@@ -2,6 +2,8 @@ package main
 
 import (
 	"fmt"
+	"path/filepath"
+	"strings"
 
 	"github.com/charmbracelet/lipgloss"
 )
@@ -31,4 +33,25 @@ func printHeader(msg string) {
 
 func printInfo(msg string) {
 	fmt.Println(dimStyle.Render(msg))
+}
+
+// shortenTarget replaces the monorepo prefix in a path with <alias> or <basename>.
+// e.g. "/home/user/projects/my-mono/packages/pkg-a" → "<my-mono>/packages/pkg-a"
+func shortenTarget(target, monorepoDir, alias string) string {
+	if monorepoDir == "" {
+		return target
+	}
+	// Ensure trailing slash for clean prefix matching
+	prefix := monorepoDir
+	if !strings.HasSuffix(prefix, "/") {
+		prefix += "/"
+	}
+	if !strings.HasPrefix(target, prefix) {
+		return target
+	}
+	label := alias
+	if label == "" {
+		label = filepath.Base(monorepoDir)
+	}
+	return "<" + label + ">/" + target[len(prefix):]
 }

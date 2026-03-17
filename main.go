@@ -115,10 +115,27 @@ func cmdStatus(nodeModulesDir string) error {
 		return nil
 	}
 
+	monorepoDir, alias := resolveDisplayInfo(nodeModulesDir)
 	for _, link := range links {
-		fmt.Printf("  %s → %s\n", link.Name, dimStyle.Render(link.Target))
+		display := shortenTarget(link.Target, monorepoDir, alias)
+		fmt.Printf("  %s → %s\n", link.Name, dimStyle.Render(display))
 	}
 	return nil
+}
+
+// resolveDisplayInfo returns the monorepo path and alias for shortening displayed paths.
+// It checks the link state first, then falls back to the config file.
+func resolveDisplayInfo(nmDir string) (monorepoDir, alias string) {
+	if state, err := loadLinkState(nmDir); err == nil && state != nil {
+		monorepoDir = state.Monorepo
+	}
+	if cfg, err := LoadConfig(); err == nil && cfg != nil {
+		if monorepoDir == "" {
+			monorepoDir = cfg.Monorepo
+		}
+		alias = cfg.Alias
+	}
+	return
 }
 
 func cmdClean(nodeModulesDir string) error {
@@ -346,9 +363,11 @@ func cmdCheck(nmDir string) error {
 		return nil
 	}
 
+	monorepoDir, alias := resolveDisplayInfo(nmDir)
 	printHeader("Found yln symlinks:")
 	for _, link := range links {
-		fmt.Printf("  %s → %s\n", link.Name, dimStyle.Render(link.Target))
+		display := shortenTarget(link.Target, monorepoDir, alias)
+		fmt.Printf("  %s → %s\n", link.Name, dimStyle.Render(display))
 	}
 	return fmt.Errorf("found %d yln symlink(s) in node_modules", len(links))
 }
