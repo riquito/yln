@@ -8,26 +8,40 @@ it only links the packages you need.
 
 ```sh
 go build -o yln .
+ln -s $PWD/yln ~/.local/bin
 ```
+
+## Configuration
+
+It's suggested to use a configuration file to define a alias to the monorepo you work with
+
+Set a default monorepo path in `~/.config/yln/config.toml`:
+
+```toml
+monorepo = "~/projects/my-monorepo"
+```
+
+If you don't do that, you will have to add `--monorepo <path>` to most of the commands.
 
 ## Usage
 
 ```sh
 # Link specific packages (from the app directory)
-yln add lodash-es --monorepo ../my-monorepo
-# Links lodash-es AND its transitive workspace deps, but nothing else
-
-# Interactive picker (TUI with fuzzy search — space to toggle, enter to confirm)
-yln edit --monorepo ../my-monorepo
+yln add some-pkg
+# Links some-pkg AND its transitive workspace deps, but nothing else
 
 # Dry run: preview what would be linked without making changes
-yln add --dry-run lodash-es --monorepo ../my-monorepo
+yln add --dry-run some-pkg
+
+# Remove specific package links
+yln rm some-pkg
+
+# Interactive picker (TUI with fuzzy search — space to toggle, enter to confirm)
+# Despite the name you use just this one to add/remove packages
+yln edit
 
 # Show currently linked packages
 yln status
-
-# Remove specific package links
-yln rm lodash-es
 
 # Remove all symlinks
 yln clean
@@ -43,15 +57,6 @@ yln pop
 
 # Watch linked packages for changes (re-links on dep changes, reloads on branch switch)
 yln watch
-yln watch --monorepo ../my-monorepo
-```
-
-## Configuration
-
-Set a default monorepo path in `~/.config/yln/config.toml`:
-
-```toml
-monorepo = "~/projects/my-monorepo"
 ```
 
 ## State tracking
@@ -86,7 +91,7 @@ yarn link
 
 # 2. Link (from the app directory)
 cd my-app
-yarn link lodash-es
+yarn link some-pkg
 ```
 
 If `pkg-a` depends on another workspace package `pkg-b`, the app keeps its own npm
