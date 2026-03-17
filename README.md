@@ -6,10 +6,21 @@ it only links the packages you need.
 
 ## Installation
 
+Download the latest release from https://github.com/riquito/yln/releases
+or build it yourself
+
 ```sh
 go build -o yln .
+```
+
+Don't forget to add it somewhere in your `$PATH` for easy usage, e.g.
+
+```sh
 ln -s $PWD/yln ~/.local/bin
 ```
+
+```sh
+https://github.com/riquito/yln/releases
 
 ## Configuration
 
