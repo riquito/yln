@@ -1,6 +1,6 @@
 # Changelog
 
-## [Unreleased]
+## [1.1.0] - 2026-03-18
 
 - support legacy monorepo format workspaces: { packages: [] }
 - suggest running `yarn install` whenver a symlink is removed
