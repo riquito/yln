@@ -235,6 +235,7 @@ func cmdTUI(monorepoPath, nodeModulesDir string, dryRun bool) error {
 	}
 
 	// Remove symlinks that are no longer needed
+	removedAny := false
 	if !dryRun {
 		newResolved := make(map[string]bool)
 		for _, name := range ResolveLinkSet(monorepo, packages) {
@@ -246,7 +247,6 @@ func cmdTUI(monorepoPath, nodeModulesDir string, dryRun bool) error {
 			return err
 		}
 
-		removedAny := false
 		for _, link := range oldLinks {
 			if !newResolved[link.Name] {
 				path := filepath.Join(nodeModulesDir, link.Name)
@@ -262,8 +262,6 @@ func cmdTUI(monorepoPath, nodeModulesDir string, dryRun bool) error {
 			if err := deleteLinkState(nodeModulesDir); err != nil {
 				return err
 			}
-			fmt.Println(warnStyle.Render("Run 'yarn install' to restore removed packages."))
-			return nil
 		}
 	}
 
@@ -287,6 +285,10 @@ func cmdTUI(monorepoPath, nodeModulesDir string, dryRun bool) error {
 				return err
 			}
 		}
+	}
+
+	if removedAny {
+		fmt.Println(warnStyle.Render("Run 'yarn install' to restore removed packages."))
 	}
 
 	return nil

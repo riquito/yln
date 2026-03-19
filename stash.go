@@ -145,6 +145,7 @@ func cmdStash(args []string, nmDir string) error {
 	}
 
 	fmt.Printf("Stashed %d package(s).\n", len(pkgNames))
+	fmt.Println(warnStyle.Render("Run 'yarn install' to restore removed packages."))
 	return nil
 }
 

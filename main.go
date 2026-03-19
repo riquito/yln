@@ -142,7 +142,11 @@ func cmdClean(nodeModulesDir string) error {
 	if err := RemoveLinks(nodeModulesDir); err != nil {
 		return err
 	}
-	return deleteLinkState(nodeModulesDir)
+	if err := deleteLinkState(nodeModulesDir); err != nil {
+		return err
+	}
+	fmt.Println(warnStyle.Render("Run 'yarn install' to restore removed packages."))
+	return nil
 }
 
 func cmdAdd(args []string, nmDir string) error {
