@@ -288,7 +288,7 @@ func cmdTUI(monorepoPath, nodeModulesDir string, dryRun bool) error {
 	}
 
 	if removedAny {
-		fmt.Println(warnStyle.Render("Run 'yarn install' to restore removed packages."))
+		fmt.Println(warnStyle.Render("Run 'yarn install' to restore packages no more symlinked."))
 	}
 
 	return nil

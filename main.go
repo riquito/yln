@@ -145,7 +145,7 @@ func cmdClean(nodeModulesDir string) error {
 	if err := deleteLinkState(nodeModulesDir); err != nil {
 		return err
 	}
-	fmt.Println(warnStyle.Render("Run 'yarn install' to restore removed packages."))
+	fmt.Println(warnStyle.Render("Run 'yarn install' to restore packages no more symlinked."))
 	return nil
 }
 
@@ -352,7 +352,7 @@ func cmdRm(args []string, nmDir string) error {
 		}
 	}
 
-	fmt.Println(warnStyle.Render("Run 'yarn install' to restore removed packages."))
+	fmt.Println(warnStyle.Render("Run 'yarn install' to restore packages no more symlinked."))
 	return nil
 }
 
