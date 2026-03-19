@@ -12,7 +12,44 @@ type PackageJSON struct {
 	Name         string            `json:"name"`
 	Version      string            `json:"version"`
 	Dependencies map[string]string `json:"dependencies"`
-	Workspaces   []string          `json:"workspaces"`
+	Workspaces   []string          `json:"-"` // parsed via custom UnmarshalJSON
+}
+
+// UnmarshalJSON handles both workspace formats:
+//   - "workspaces": ["packages/*"]
+//   - "workspaces": { "packages": ["packages/*"] }
+func (p *PackageJSON) UnmarshalJSON(data []byte) error {
+	// Use an alias to avoid infinite recursion.
+	type Alias PackageJSON
+	var raw struct {
+		Alias
+		Workspaces json.RawMessage `json:"workspaces"`
+	}
+	if err := json.Unmarshal(data, &raw); err != nil {
+		return err
+	}
+	*p = PackageJSON(raw.Alias)
+
+	if len(raw.Workspaces) == 0 {
+		return nil
+	}
+
+	// Try array form first: ["packages/*"]
+	var arr []string
+	if err := json.Unmarshal(raw.Workspaces, &arr); err == nil {
+		p.Workspaces = arr
+		return nil
+	}
+
+	// Try object form: { "packages": ["packages/*"] }
+	var obj struct {
+		Packages []string `json:"packages"`
+	}
+	if err := json.Unmarshal(raw.Workspaces, &obj); err != nil {
+		return fmt.Errorf("workspaces: expected array or object with packages field, got %s", raw.Workspaces)
+	}
+	p.Workspaces = obj.Packages
+	return nil
 }
 
 // Workspace represents a single workspace package in the monorepo.

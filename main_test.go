@@ -289,6 +289,50 @@ func TestScopedPackageLink(t *testing.T) {
 	assertSymlink(t, filepath.Join(nodeModulesDir, "@scope", "pkg"), pkgDir)
 }
 
+func TestLoadMonorepoObjectWorkspaces(t *testing.T) {
+	// Create a minimal monorepo using the object form: { "packages": [...] }
+	tmpDir := t.TempDir()
+	monorepoDir := filepath.Join(tmpDir, "monorepo")
+
+	// Create workspace packages
+	for _, pkg := range []struct {
+		dir  string
+		json string
+	}{
+		{"packages/pkg-x", `{"name": "pkg-x", "version": "1.0.0"}`},
+		{"packages/pkg-y", `{"name": "pkg-y", "version": "1.0.0"}`},
+	} {
+		dir := filepath.Join(monorepoDir, pkg.dir)
+		os.MkdirAll(dir, 0o755)
+		os.WriteFile(filepath.Join(dir, "package.json"), []byte(pkg.json), 0o644)
+	}
+
+	// Root package.json with object-form workspaces (legacy format with nohoist)
+	os.WriteFile(filepath.Join(monorepoDir, "package.json"),
+		[]byte(`{"private": true, "workspaces": {"packages": ["packages/*"], "nohoist": ["**/react-native"]}}`), 0o644)
+
+	m, err := LoadMonorepo(monorepoDir)
+	if err != nil {
+		t.Fatalf("LoadMonorepo with object workspaces: %v", err)
+	}
+
+	expectedNames := []string{"pkg-x", "pkg-y"}
+	var gotNames []string
+	for name := range m.Workspaces {
+		gotNames = append(gotNames, name)
+	}
+	sort.Strings(gotNames)
+
+	if len(gotNames) != len(expectedNames) {
+		t.Fatalf("expected %d workspaces, got %d: %v", len(expectedNames), len(gotNames), gotNames)
+	}
+	for i, name := range expectedNames {
+		if gotNames[i] != name {
+			t.Errorf("workspace[%d]: expected %q, got %q", i, name, gotNames[i])
+		}
+	}
+}
+
 // setTestStashDir overrides the stash file path to use a temporary directory.
 // Returns a cleanup function that restores the original.
 func setTestStashDir(t *testing.T) string {
