@@ -10,7 +10,7 @@ const usage = `yln — yarn linker
 
 Usage:
   yln add <pkg1> [pkg2...] [--monorepo <path>] [--dry-run]    Link packages from a monorepo
-  yln rm <pkg1> [pkg2...] [--monorepo <path>]                 Remove specific package links
+  yln rm <pkg1> [pkg2...]                                     Remove specific package links
   yln edit [--monorepo <path>] [--dry-run]                    Interactive package picker (TUI)
   yln status                                                  Show currently linked packages
   yln clean                                                   Remove all symlinks
@@ -242,17 +242,10 @@ func cmdEdit(args []string, nmDir string) error {
 }
 
 func cmdRm(args []string, nmDir string) error {
-	var monorepoPath string
 	var packages []string
 
 	for i := 0; i < len(args); i++ {
 		switch args[i] {
-		case "--monorepo":
-			if i+1 >= len(args) {
-				return fmt.Errorf("--monorepo requires a path argument")
-			}
-			i++
-			monorepoPath = args[i]
 		case "--help", "-h":
 			fmt.Print(usage)
 			return nil
@@ -317,10 +310,12 @@ func cmdRm(args []string, nmDir string) error {
 				return err
 			}
 		} else {
-			// Resolve the new link set and remove orphaned transitive deps
-			monorepo, err := resolveMonorepo(monorepoPath)
+			// Resolve the new link set and remove orphaned transitive deps.
+			// Use the monorepo path recorded in state so we resolve against the
+			// same monorepo the existing links point at.
+			monorepo, err := LoadMonorepo(state.Monorepo)
 			if err != nil {
-				return err
+				return fmt.Errorf("loading monorepo %s: %w", state.Monorepo, err)
 			}
 			newSet := ResolveLinkSet(monorepo, remaining)
 			needed := make(map[string]bool, len(newSet))
