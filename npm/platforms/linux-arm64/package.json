@@ -1,0 +1,13 @@
+{
+  "name": "@riquito/yln-linux-arm64",
+  "version": "0.0.0",
+  "description": "Linux arm64 binary for @riquito/yln",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/riquito/yln.git"
+  },
+  "license": "MIT",
+  "os": ["linux"],
+  "cpu": ["arm64"],
+  "files": ["bin/yln"]
+}

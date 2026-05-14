@@ -1,0 +1,13 @@
+{
+  "name": "@riquito/yln-darwin-x64",
+  "version": "0.0.0",
+  "description": "macOS x64 binary for @riquito/yln",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/riquito/yln.git"
+  },
+  "license": "MIT",
+  "os": ["darwin"],
+  "cpu": ["x64"],
+  "files": ["bin/yln"]
+}

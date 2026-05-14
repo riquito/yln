@@ -1,0 +1,31 @@
+{
+  "name": "@riquito/yln",
+  "version": "0.0.0",
+  "description": "yarn linker — manage yarn link relationships across local projects",
+  "bin": {
+    "yln": "bin/yln.js"
+  },
+  "files": [
+    "bin/yln.js",
+    "README.md"
+  ],
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/riquito/yln.git"
+  },
+  "homepage": "https://github.com/riquito/yln#readme",
+  "bugs": {
+    "url": "https://github.com/riquito/yln/issues"
+  },
+  "license": "MIT",
+  "engines": {
+    "node": ">=24"
+  },
+  "optionalDependencies": {
+    "@riquito/yln-linux-x64": "0.0.0",
+    "@riquito/yln-linux-arm64": "0.0.0",
+    "@riquito/yln-darwin-x64": "0.0.0",
+    "@riquito/yln-darwin-arm64": "0.0.0",
+    "@riquito/yln-win32-x64": "0.0.0"
+  }
+}

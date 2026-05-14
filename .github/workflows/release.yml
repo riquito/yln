@@ -26,3 +26,69 @@ jobs:
           args: release --clean
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "24"
+          registry-url: "https://registry.npmjs.org"
+
+      - name: Stage binaries into npm platform packages
+        run: |
+          set -euo pipefail
+          declare -A MAP=(
+            [linux-x64]="dist/*linux_amd64*/yln"
+            [linux-arm64]="dist/*linux_arm64*/yln"
+            [darwin-x64]="dist/*darwin_amd64*/yln"
+            [darwin-arm64]="dist/*darwin_arm64*/yln"
+            [win32-x64]="dist/*windows_amd64*/yln.exe"
+          )
+          for name in "${!MAP[@]}"; do
+            src=$(ls ${MAP[$name]} | head -n1)
+            dest="npm/platforms/$name/bin"
+            mkdir -p "$dest"
+            cp -v "$src" "$dest/"
+            chmod +x "$dest"/* || true
+          done
+
+      - name: Set version in all package.json files
+        run: |
+          set -euo pipefail
+          VERSION="${GITHUB_REF_NAME#v}"
+          node - "$VERSION" <<'EOF'
+          const fs = require('node:fs');
+          const version = process.argv[2];
+          const files = [
+            'npm/yln/package.json',
+            'npm/platforms/linux-x64/package.json',
+            'npm/platforms/linux-arm64/package.json',
+            'npm/platforms/darwin-x64/package.json',
+            'npm/platforms/darwin-arm64/package.json',
+            'npm/platforms/win32-x64/package.json',
+          ];
+          for (const f of files) {
+            const pkg = JSON.parse(fs.readFileSync(f, 'utf8'));
+            pkg.version = version;
+            if (pkg.optionalDependencies) {
+              for (const k of Object.keys(pkg.optionalDependencies)) {
+                pkg.optionalDependencies[k] = version;
+              }
+            }
+            fs.writeFileSync(f, JSON.stringify(pkg, null, 2) + '\n');
+          }
+          EOF
+
+      - name: Publish platform packages to npm
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+        run: |
+          set -euo pipefail
+          for d in npm/platforms/*/; do
+            (cd "$d" && npm publish --access public)
+          done
+
+      - name: Publish main package to npm
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+        run: |
+          cd npm/yln
+          npm publish --access public
