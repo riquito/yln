@@ -6,17 +6,27 @@ it only links the packages you need.
 
 ## Installation
 
-Download the latest release from https://github.com/riquito/yln/releases
-or build it yourself
+### npm (recommended)
 
 ```sh
-go build -o yln .
+npm install -g @riquito/yln
 ```
 
-Don't forget to add it somewhere in your `$PATH` for easy usage, e.g.
+Ships prebuilt binaries for Linux and macOS (x64 + arm64) and Windows (x64).
+
+### From a GitHub release
+
+Download the archive for your platform from https://github.com/riquito/yln/releases
+and place the `yln` binary somewhere on your `$PATH`, e.g.
 
 ```sh
 ln -s $PWD/yln ~/.local/bin
+```
+
+### From source
+
+```sh
+go build -o yln .
 ```
 
 ## Configuration
