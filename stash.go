@@ -102,6 +102,10 @@ func cmdStash(args []string, nmDir string) error {
 		}
 	}
 
+	if err := guardNotMonorepoRoot(nmDir); err != nil {
+		return err
+	}
+
 	// Resolve monorepo path (needed at pop time)
 	monorepo, err := resolveMonorepo(monorepoPath)
 	if err != nil {
@@ -150,6 +154,10 @@ func cmdStash(args []string, nmDir string) error {
 }
 
 func cmdPop(args []string, nmDir string) error {
+	if err := guardNotMonorepoRoot(nmDir); err != nil {
+		return err
+	}
+
 	data, err := loadStash()
 	if err != nil {
 		return err

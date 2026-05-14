@@ -84,6 +84,24 @@ func nodeModulesDir() string {
 	return filepath.Join(cwd, "node_modules")
 }
 
+// guardNotMonorepoRoot refuses to run if nmDir's parent directory has a
+// package.json that declares "workspaces". yln is meant to run from an
+// application that consumes packages from a separate monorepo; running
+// destructive commands inside the monorepo root would clobber the
+// workspace symlinks yarn install created there.
+func guardNotMonorepoRoot(nmDir string) error {
+	appRoot := filepath.Dir(nmDir)
+	pkg, err := readPackageJSON(filepath.Join(appRoot, "package.json"))
+	if err != nil {
+		// No package.json (or unreadable) — not a monorepo root we recognize.
+		return nil
+	}
+	if len(pkg.Workspaces) > 0 {
+		return fmt.Errorf("refusing to run in monorepo root: %s/package.json declares 'workspaces'. yln must be run from an application that consumes packages from a monorepo, not from the monorepo itself", appRoot)
+	}
+	return nil
+}
+
 // resolveMonorepo resolves --monorepo flag > config > error, loads and returns Monorepo.
 func resolveMonorepo(monorepoPath string) (*Monorepo, error) {
 	if monorepoPath == "" {
@@ -148,6 +166,9 @@ func resolveDisplayInfo(nmDir string) (monorepoDir, alias string) {
 }
 
 func cmdClean(nodeModulesDir string) error {
+	if err := guardNotMonorepoRoot(nodeModulesDir); err != nil {
+		return err
+	}
 	if err := RemoveLinks(nodeModulesDir); err != nil {
 		return err
 	}
@@ -183,6 +204,10 @@ func cmdAdd(args []string, nmDir string) error {
 
 	if len(packages) == 0 {
 		return fmt.Errorf("no packages specified (usage: yln add <pkg1> [pkg2...])")
+	}
+
+	if err := guardNotMonorepoRoot(nmDir); err != nil {
+		return err
 	}
 
 	monorepo, err := resolveMonorepo(monorepoPath)
@@ -247,6 +272,10 @@ func cmdEdit(args []string, nmDir string) error {
 		}
 	}
 
+	if err := guardNotMonorepoRoot(nmDir); err != nil {
+		return err
+	}
+
 	return cmdTUI(monorepoPath, nmDir, dryRun)
 }
 
@@ -265,6 +294,10 @@ func cmdRm(args []string, nmDir string) error {
 
 	if len(packages) == 0 {
 		return fmt.Errorf("no packages specified (usage: yln rm <pkg1> [pkg2...])")
+	}
+
+	if err := guardNotMonorepoRoot(nmDir); err != nil {
+		return err
 	}
 
 	// Verify named packages are currently linked

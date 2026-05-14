@@ -1362,6 +1362,71 @@ func TestRmDirectRequestedNoWarning(t *testing.T) {
 	}
 }
 
+// TestGuardRefusesInMonorepoRoot verifies that destructive commands refuse
+// to run when the current directory's package.json declares "workspaces" —
+// i.e. when the user is sitting in the monorepo root instead of an
+// application that consumes packages from it.
+func TestGuardRefusesInMonorepoRoot(t *testing.T) {
+	// Create a fake monorepo root with package.json declaring workspaces.
+	rootDir := t.TempDir()
+	os.WriteFile(filepath.Join(rootDir, "package.json"),
+		[]byte(`{"private": true, "workspaces": ["packages/*"]}`), 0o644)
+	nmDir := filepath.Join(rootDir, "node_modules")
+	os.MkdirAll(nmDir, 0o755)
+
+	// Plant a fake symlink that we expect to survive.
+	target := t.TempDir()
+	if err := os.Symlink(target, filepath.Join(nmDir, "some-pkg")); err != nil {
+		t.Fatalf("symlink: %v", err)
+	}
+
+	if err := cmdClean(nmDir); err == nil {
+		t.Error("cmdClean: expected refusal in monorepo root, got nil error")
+	}
+
+	// The pre-existing symlink should still be there.
+	if _, err := os.Lstat(filepath.Join(nmDir, "some-pkg")); err != nil {
+		t.Errorf("symlink should be untouched after refusal, got: %v", err)
+	}
+
+	if err := cmdRm([]string{"some-pkg"}, nmDir); err == nil {
+		t.Error("cmdRm: expected refusal in monorepo root, got nil error")
+	}
+}
+
+// TestGuardAcceptsObjectFormWorkspaces verifies the guard handles the
+// alternative workspaces syntax: {"packages": [...]}.
+func TestGuardAcceptsObjectFormWorkspaces(t *testing.T) {
+	rootDir := t.TempDir()
+	os.WriteFile(filepath.Join(rootDir, "package.json"),
+		[]byte(`{"workspaces": {"packages": ["pkgs/*"]}}`), 0o644)
+	nmDir := filepath.Join(rootDir, "node_modules")
+	os.MkdirAll(nmDir, 0o755)
+
+	if err := cmdClean(nmDir); err == nil {
+		t.Error("cmdClean: expected refusal for object-form workspaces, got nil")
+	}
+}
+
+// TestGuardAllowsInRegularApp verifies the guard does NOT trip in a regular
+// application directory (no package.json, or one without "workspaces").
+func TestGuardAllowsInRegularApp(t *testing.T) {
+	// Case 1: no package.json at all
+	rootDir := t.TempDir()
+	nmDir := filepath.Join(rootDir, "node_modules")
+	os.MkdirAll(nmDir, 0o755)
+	if err := guardNotMonorepoRoot(nmDir); err != nil {
+		t.Errorf("expected no error without package.json, got: %v", err)
+	}
+
+	// Case 2: package.json without workspaces
+	os.WriteFile(filepath.Join(rootDir, "package.json"),
+		[]byte(`{"name": "my-app", "dependencies": {"foo": "1.0.0"}}`), 0o644)
+	if err := guardNotMonorepoRoot(nmDir); err != nil {
+		t.Errorf("expected no error without workspaces, got: %v", err)
+	}
+}
+
 func assertSymlink(t *testing.T, path, expectedTarget string) {
 	t.Helper()
 	fi, err := os.Lstat(path)
