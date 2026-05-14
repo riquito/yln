@@ -4,7 +4,16 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 )
+
+func quoteAll(items []string) []string {
+	out := make([]string, len(items))
+	for i, s := range items {
+		out[i] = fmt.Sprintf("%q", s)
+	}
+	return out
+}
 
 const usage = `yln — yarn linker
 
@@ -273,6 +282,51 @@ func cmdRm(args []string, nmDir string) error {
 		}
 	}
 
+	// Load state up-front so we can both warn about removing transitive-only
+	// links and (later) re-resolve the remaining link set.
+	state, err := loadLinkState(nmDir)
+	if err != nil {
+		return err
+	}
+
+	var monorepo *Monorepo
+	if state != nil && len(state.Requested) > 0 {
+		monorepo, err = LoadMonorepo(state.Monorepo)
+		if err != nil {
+			return fmt.Errorf("loading monorepo %s: %w", state.Monorepo, err)
+		}
+
+		// For each requested package, find its transitive workspace deps and
+		// record which requested packages pull each one in. parents[X] is the
+		// list of user-requested packages that (transitively) depend on X.
+		requestedSet := make(map[string]bool, len(state.Requested))
+		for _, req := range state.Requested {
+			requestedSet[req] = true
+		}
+		parents := make(map[string][]string)
+		for _, req := range state.Requested {
+			deps := ResolveLinkSet(monorepo, []string{req})
+			for _, dep := range deps {
+				if dep == req {
+					continue
+				}
+				parents[dep] = append(parents[dep], req)
+			}
+		}
+
+		for _, pkg := range packages {
+			if requestedSet[pkg] {
+				continue
+			}
+			if ps := parents[pkg]; len(ps) > 0 {
+				fmt.Println(warnStyle.Render(fmt.Sprintf(
+					"Warning: %q was not requested directly — it is a workspace dependency of %s. It will likely be re-linked next time the link set is resolved; remove the parent instead if you want it gone.",
+					pkg, strings.Join(quoteAll(ps), ", "),
+				)))
+			}
+		}
+	}
+
 	// Remove specified symlinks
 	for _, pkg := range packages {
 		path := filepath.Join(nmDir, pkg)
@@ -280,12 +334,6 @@ func cmdRm(args []string, nmDir string) error {
 			return fmt.Errorf("removing symlink %s: %w", path, err)
 		}
 		printRemoved(pkg)
-	}
-
-	// Update state: remove specified packages from requested set
-	state, err := loadLinkState(nmDir)
-	if err != nil {
-		return err
 	}
 
 	if state != nil {
@@ -311,12 +359,7 @@ func cmdRm(args []string, nmDir string) error {
 			}
 		} else {
 			// Resolve the new link set and remove orphaned transitive deps.
-			// Use the monorepo path recorded in state so we resolve against the
-			// same monorepo the existing links point at.
-			monorepo, err := LoadMonorepo(state.Monorepo)
-			if err != nil {
-				return fmt.Errorf("loading monorepo %s: %w", state.Monorepo, err)
-			}
+			// monorepo was loaded above against state.Monorepo.
 			newSet := ResolveLinkSet(monorepo, remaining)
 			needed := make(map[string]bool, len(newSet))
 			for _, name := range newSet {
