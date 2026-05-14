@@ -2,16 +2,41 @@ package main
 
 import (
 	"encoding/json"
+	"io"
 	"os"
 	"path/filepath"
 	"runtime"
 	"sort"
+	"strings"
 	"syscall"
 	"testing"
 	"time"
 
 	"github.com/fsnotify/fsnotify"
 )
+
+// captureStdout redirects os.Stdout while fn runs and returns whatever was
+// written. Used for asserting on user-facing warnings.
+func captureStdout(t *testing.T, fn func()) string {
+	t.Helper()
+	r, w, err := os.Pipe()
+	if err != nil {
+		t.Fatalf("pipe: %v", err)
+	}
+	orig := os.Stdout
+	os.Stdout = w
+	defer func() { os.Stdout = orig }()
+
+	done := make(chan string, 1)
+	go func() {
+		b, _ := io.ReadAll(r)
+		done <- string(b)
+	}()
+
+	fn()
+	w.Close()
+	return <-done
+}
 
 func testdataDir(t *testing.T) string {
 	t.Helper()
@@ -1203,6 +1228,138 @@ func TestWatchReloadsMonorepoOnHEADChange(t *testing.T) {
 	// pkg-a and pkg-b should still be linked
 	assertSymlink(t, filepath.Join(nmDir, "pkg-a"), monorepo.Workspaces["pkg-a"].Dir)
 	assertSymlink(t, filepath.Join(nmDir, "pkg-b"), monorepo.Workspaces["pkg-b"].Dir)
+}
+
+// TestRmUsesStateMonorepo verifies that cmdRm no longer requires --monorepo:
+// it reads the monorepo path from the on-disk link state and re-resolves the
+// remaining link set against it.
+func TestRmUsesStateMonorepo(t *testing.T) {
+	_, monorepo := setupWatchTestMonorepo(t)
+
+	tmpDir := t.TempDir()
+	nmDir := filepath.Join(tmpDir, "node_modules")
+	os.MkdirAll(nmDir, 0o755)
+	for _, name := range []string{"pkg-a", "pkg-b", "pkg-c"} {
+		os.MkdirAll(filepath.Join(nmDir, name), 0o755)
+	}
+	setTestStateDir(t, nmDir)
+
+	// Link pkg-a (pulls in pkg-b transitively) and pkg-c (independent).
+	if err := Link(monorepo, nmDir, []string{"pkg-a", "pkg-c"}, false); err != nil {
+		t.Fatalf("Link: %v", err)
+	}
+	if err := saveLinkState(nmDir, &LinkState{
+		Monorepo:  monorepo.RootDir,
+		Requested: []string{"pkg-a", "pkg-c"},
+	}); err != nil {
+		t.Fatalf("saveLinkState: %v", err)
+	}
+
+	// Remove pkg-a without passing --monorepo.
+	if err := cmdRm([]string{"pkg-a"}, nmDir); err != nil {
+		t.Fatalf("cmdRm: %v", err)
+	}
+
+	// pkg-a and its orphaned transitive dep pkg-b should be gone; pkg-c stays.
+	if _, err := os.Lstat(filepath.Join(nmDir, "pkg-a")); !os.IsNotExist(err) {
+		t.Error("pkg-a symlink should be removed")
+	}
+	if _, err := os.Lstat(filepath.Join(nmDir, "pkg-b")); !os.IsNotExist(err) {
+		t.Error("pkg-b symlink should be removed as an orphaned transitive dep")
+	}
+	assertSymlink(t, filepath.Join(nmDir, "pkg-c"), monorepo.Workspaces["pkg-c"].Dir)
+
+	// State should keep the same Monorepo and have only pkg-c remaining.
+	state, err := loadLinkState(nmDir)
+	if err != nil {
+		t.Fatalf("loadLinkState: %v", err)
+	}
+	if state == nil {
+		t.Fatal("state should not be nil")
+	}
+	if state.Monorepo != monorepo.RootDir {
+		t.Errorf("state.Monorepo: expected %q, got %q", monorepo.RootDir, state.Monorepo)
+	}
+	if len(state.Requested) != 1 || state.Requested[0] != "pkg-c" {
+		t.Errorf("state.Requested: expected [pkg-c], got %v", state.Requested)
+	}
+}
+
+// TestRmWarnsOnTransitiveOnly verifies that removing a package that was only
+// linked as a transitive workspace dep (not directly requested) prints a
+// warning naming the requested parent.
+func TestRmWarnsOnTransitiveOnly(t *testing.T) {
+	_, monorepo := setupWatchTestMonorepo(t)
+
+	tmpDir := t.TempDir()
+	nmDir := filepath.Join(tmpDir, "node_modules")
+	os.MkdirAll(nmDir, 0o755)
+	for _, name := range []string{"pkg-a", "pkg-b"} {
+		os.MkdirAll(filepath.Join(nmDir, name), 0o755)
+	}
+	setTestStateDir(t, nmDir)
+
+	if err := Link(monorepo, nmDir, []string{"pkg-a"}, false); err != nil {
+		t.Fatalf("Link: %v", err)
+	}
+	if err := saveLinkState(nmDir, &LinkState{
+		Monorepo:  monorepo.RootDir,
+		Requested: []string{"pkg-a"},
+	}); err != nil {
+		t.Fatalf("saveLinkState: %v", err)
+	}
+
+	out := captureStdout(t, func() {
+		if err := cmdRm([]string{"pkg-b"}, nmDir); err != nil {
+			t.Fatalf("cmdRm: %v", err)
+		}
+	})
+
+	if !strings.Contains(out, "Warning:") {
+		t.Errorf("expected a warning in output, got:\n%s", out)
+	}
+	if !strings.Contains(out, "pkg-b") || !strings.Contains(out, "pkg-a") {
+		t.Errorf("warning should mention both pkg-b and its parent pkg-a, got:\n%s", out)
+	}
+
+	// We warn, we don't block: pkg-b should still be removed.
+	if _, err := os.Lstat(filepath.Join(nmDir, "pkg-b")); !os.IsNotExist(err) {
+		t.Error("pkg-b symlink should be removed even when only a transitive dep")
+	}
+}
+
+// TestRmDirectRequestedNoWarning verifies that removing a directly-requested
+// package does not trigger the transitive-dep warning.
+func TestRmDirectRequestedNoWarning(t *testing.T) {
+	_, monorepo := setupWatchTestMonorepo(t)
+
+	tmpDir := t.TempDir()
+	nmDir := filepath.Join(tmpDir, "node_modules")
+	os.MkdirAll(nmDir, 0o755)
+	for _, name := range []string{"pkg-a", "pkg-b"} {
+		os.MkdirAll(filepath.Join(nmDir, name), 0o755)
+	}
+	setTestStateDir(t, nmDir)
+
+	if err := Link(monorepo, nmDir, []string{"pkg-a", "pkg-b"}, false); err != nil {
+		t.Fatalf("Link: %v", err)
+	}
+	if err := saveLinkState(nmDir, &LinkState{
+		Monorepo:  monorepo.RootDir,
+		Requested: []string{"pkg-a", "pkg-b"},
+	}); err != nil {
+		t.Fatalf("saveLinkState: %v", err)
+	}
+
+	out := captureStdout(t, func() {
+		if err := cmdRm([]string{"pkg-b"}, nmDir); err != nil {
+			t.Fatalf("cmdRm: %v", err)
+		}
+	})
+
+	if strings.Contains(out, "Warning:") {
+		t.Errorf("did not expect a warning when removing a directly-requested package, got:\n%s", out)
+	}
 }
 
 func assertSymlink(t *testing.T, path, expectedTarget string) {
